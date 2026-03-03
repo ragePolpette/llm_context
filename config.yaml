@@ -1,0 +1,187 @@
+embedding_dim: 384
+ivfflat_lists: 100
+max_bytes: 5000000
+chunk_size: 1200
+chunk_overlap: 300
+md_chunk_size: 1600
+code_chunk_size: 2500
+min_chunk_chars: 200
+include_dirs:
+  - pubblico/api
+  - pubblico/bpofh
+  - pubblico/js
+  - pubblico/css
+  - pubblico/assets/template
+  - pubblico/*.aspx
+  - pubblico/*.html
+  - librerie/BpoFH
+  - librerie/Fiscobot
+  - librerie/primanota
+  - db/schema-completo
+  - instructions
+assets_template_only: true
+assets_root_dir: pubblico/assets
+assets_template_dir: pubblico/assets/template
+incremental_ingest: true
+vector_weight: 0.5
+keyword_weight: 0.5
+max_chunks_per_doc: 5
+min_score: 0.20
+header_penalty: 0.05
+rerank_enabled: false
+default_doc_type: code
+exclude_globs:
+  - "*.env*"
+  - "web.config"
+  - "pubblico/Web.config"
+  - "App_Code/**"
+never_index_ext:
+  - ".pfx"
+  - ".pem"
+  - ".key"
+  - ".cer"
+scope_map:
+  librerie\\BpoFH\\:
+    - bpofh
+    - bpo fh
+    - bpo-fh
+    - bpo fh backend
+  librerie\\Fiscobot\\:
+    - fiscobot
+    - fisco bot
+    - docconta
+    - doc conta
+    - doc conta fiscobot
+  librerie\\primanota\\:
+    - primanota
+    - prima nota
+    - prima-nota
+  JS\\primanota\\:
+    - primanota js
+    - primanota frontend
+    - primanota ui
+  pubblico\\bpofh\\:
+    - bpofh frontend
+    - bpofh pubblico
+    - area bpofh
+    - portale bpofh
+  pubblico\\fhff\\:
+    - fhff
+    - fatturhello
+    - fattur hello
+    - fattur-hello
+  pubblico\\api\\:
+    - pubblico api
+    - api controller
+    - api endpoint
+    - controller api
+    - fatturazione
+    - fatture
+    - studi
+    - affiliazione
+  pubblico\\internalorm\\:
+    - internalorm
+    - internal orm
+    - orm interno
+  pubblico\\localizationtoolkit\\:
+    - localizationtoolkit
+    - localization toolkit
+    - l10n
+    - i18n
+  pubblico\\dataexport\\:
+    - dataexport
+    - data export
+    - export dati
+  pubblico\\js\\:
+    - javascript
+    - script js
+  pubblico\\css\\:
+    - css
+    - stile
+    - stylesheet
+    - fogli di stile
+  pubblico\\assets\\template\\:
+    - template pdf
+    - modello pdf
+    - pdf template
+    - template fattura
+    - template preventivo
+    - template mandato
+    - assets template
+    - template html
+  pubblico\\assets\\template\\pdf\\:
+    - template pdf
+    - modello pdf
+    - pdf template
+    - template fattura
+    - template preventivo
+    - template mandato
+  pubblico\\testfatture\\:
+    - testfatture
+    - test fatture
+  pubblico\\testreloaded\\:
+    - testreloaded
+    - test reloaded
+  pubblico\\testlocalizationtoolkit\\:
+    - testlocalizationtoolkit
+    - test localization
+  pubblico\\unittest2\\:
+    - unittest2
+    - unit test
+    - unit tests
+  Test:
+    - testfiscobot
+    - testgestione
+    - test gestione xml
+    - testgestione xml
+  pubblico\\assets\\template\\pdf\\mandato_professionale_gallo.html:
+    - mandato professionale gallo
+    - mandato gallo
+    - preventivo professionista gallo
+  pubblico\\api\\Controllers\\FiscobotRegContabile.cs:
+    - coda fatture
+    - coda docconta
+    - docconta coda
+    - registrazione contabile coda
+    - coda contabile
+  pubblico\\api\\Controllers\\Fattura.cs:
+    - coda sdi
+    - coda fatture sdi
+    - coda sdi fatture
+    - fatturazione studi
+    - fatturazionestudi
+    - calcola fatture affiliazione
+    - genera fattura
+    - fatturazione affiliazione
+    - articoli piani anc
+    - fatturazione studio
+    - CalcolaFattureAffiliazione
+    - GeneraFattura
+    - FatturazioneAffiliazione
+    - FatturazioneStudio
+  pubblico\\api\\Controllers\\FatturazioneStudi.cs:
+    - fatturazione studi
+    - fatturazionestudi
+    - calcolo fatture affiliazione
+    - affiliati anc
+    - piano prezzo studio
+    - OttieniDatiStudiAffiliati
+    - OttieniDatiStudio
+    - CalcolaPianoEPrezzo
+    - AziendeStudioPerFatturazione
+    - dettaglio studio
+  pubblico\\api\\IFatture.cs:
+    - endpoint api fatture
+    - contratto servizio
+    - operationcontract
+    - api fatture
+    - interfaccia fatture
+    - IFatture
+  pubblico\\fatturazionestudi.html:
+    - fatturazionestudi
+    - fatturazione studi frontend
+    - pagina fatturazione
+    - fatturazione studi html
+  librerie\\Fiscobot\\:
+    - docconta
+    - registrazione contabile
