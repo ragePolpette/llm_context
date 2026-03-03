@@ -1,0 +1,64 @@
+# Environment and local overrides
+.env
+.env.*
+!.env.example
+config.local.*
+!config.local.example.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Build and artifacts
+build/
+dist/
+*.egg-info/
+
+# Logs and runtime files
+*.log
+*.out
+*.err
+*.pid
+
+# Local data and models
+.local/
+models/
+*.db
+*.sqlite
+*.sqlite3
+*.duckdb
+*.parquet
+*.feather
+*.npy
+*.npz
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.gguf
+*.safetensors
+*.tflite
+
+# Secrets and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+
+# IDE / OS
+.idea/
+.vscode/
+.claude/
+.agent/
+.DS_Store
+Thumbs.db
