@@ -3,6 +3,7 @@
 Questa guida descrive come replicare l'installazione e l'indicizzazione locale che abbiamo configurato per BpoPilot.
 L'obiettivo e' indicizzare solo un sottoinsieme di cartelle del progetto, usare embedding locali (nessun invio dati),
 e mantenere un indice v2 con metadata ricchi e aggiornamenti incrementali.
+Questo MCP serve solo per retrieval di contesto tecnico (codice/documenti): non e' un sistema di memoria operativa persistente.
 
 ## Spiegazione teorica (cosa abbiamo fatto e perche')
 
@@ -153,6 +154,13 @@ set MCP_MODELS_DIR=.local/models
 set HF_HOME=.local/models/huggingface
 set TRANSFORMERS_CACHE=.local/models/huggingface/transformers
 set SENTENCE_TRANSFORMERS_HOME=.local/models/huggingface/sentence_transformers
+
+# MCP transport security / behavior
+set MCP_HOST=127.0.0.1
+set MCP_PORT=8765
+set MCP_SSE_ENABLED=false
+set MCP_ALLOWED_HOSTS=localhost,127.0.0.1,::1
+set MCP_ALLOWED_ORIGINS=http://localhost:*,http://127.0.0.1:*,https://localhost:*,https://127.0.0.1:*
 ```
 
 Valori chiave (gia' impostati per uso locale):

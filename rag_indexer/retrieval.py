@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from .embedder import Embedder
@@ -87,7 +88,7 @@ def retrieve_v2(
         if score < min_score:
             continue
         item["score"] = score
-        item["snippet"] = _make_snippet(item.get("text", ""))
+        item["snippet"] = _make_snippet(item.get("text", ""), query_text=text)
         results.append(item)
 
     results.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
@@ -126,9 +127,38 @@ def retrieve_v2(
     return deduped, explain
 
 
-def _make_snippet(text: str, max_len: int = 300) -> str:
+def _make_snippet(
+    text: str,
+    max_len: int = 300,
+    query_text: Optional[str] = None,
+) -> str:
     if len(text) <= max_len:
         return text
+    if query_text:
+        terms = sorted(
+            {
+                token.lower()
+                for token in re.findall(r"\w+", query_text)
+                if len(token) >= 3
+            },
+            key=len,
+            reverse=True,
+        )
+        lower_text = text.lower()
+        for term in terms:
+            index = lower_text.find(term)
+            if index < 0:
+                continue
+            half = max(1, max_len // 2)
+            start = max(0, index - half)
+            end = min(len(text), start + max_len)
+            start = max(0, end - max_len)
+            body = text[start:end].strip()
+            if not body:
+                break
+            prefix = "..." if start > 0 else ""
+            suffix = "..." if end < len(text) else ""
+            return prefix + body + suffix
     return text[: max_len - 3] + "..."
 
 
