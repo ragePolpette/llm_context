@@ -19,6 +19,7 @@ from rag_indexer.db import get_connection, init_db_v2
 from rag_indexer.embedder import (
     DummyEmbedder,
     Embedder,
+    GeminiEmbedder,
     LocalHashEmbedder,
     LocalSentenceTransformerEmbedder,
 )

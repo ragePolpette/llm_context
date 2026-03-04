@@ -32,6 +32,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 import uuid
 
 # Force project path for local imports
@@ -59,8 +60,17 @@ def _acquire_instance_lock() -> bool:
     def _try_lock() -> bool:
         global _lock_file_handle
         try:
-            _lock_file_handle = open(_LOCK_PATH, "w")
+            _lock_file_handle = open(_LOCK_PATH, "a+")
+            _lock_file_handle.seek(0)
+            first_byte = _lock_file_handle.read(1)
+            if first_byte == "":
+                _lock_file_handle.seek(0)
+                _lock_file_handle.write("0")
+                _lock_file_handle.flush()
+            _lock_file_handle.seek(0)
             msvcrt.locking(_lock_file_handle.fileno(), msvcrt.LK_NBLCK, 1)
+            _lock_file_handle.seek(0)
+            _lock_file_handle.truncate()
             _lock_file_handle.write(str(os.getpid()))
             _lock_file_handle.flush()
             return True
@@ -79,6 +89,12 @@ def _acquire_instance_lock() -> bool:
         log.warning("Lock held by old PID %d, killing it...", old_pid)
         _kill_old_server(old_pid)
         time.sleep(1)
+    elif old_pid is None:
+        # Stale/empty lock file left after abnormal termination.
+        try:
+            _LOCK_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     # Retry after killing
     return _try_lock()
@@ -233,7 +249,112 @@ def _ensure_port_free(host: str, port: int) -> None:
 # HTTP/SSE Server using aiohttp
 # ============================================================================
 
-async def run_http_server(handler: MCPHandler, host: str = "127.0.0.1", port: int = 8765):
+def _parse_csv_env(raw_value: Optional[str], default: list[str]) -> list[str]:
+    if raw_value is None:
+        return list(default)
+    parts = [part.strip() for part in raw_value.split(",")]
+    values = [part for part in parts if part]
+    return values or list(default)
+
+
+def _parse_bool_env(raw_value: Optional[str], default: bool) -> bool:
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_host(value: str) -> str:
+    host = value.strip().lower()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    return host
+
+
+def _normalize_request_host(host_header: Optional[str]) -> Optional[str]:
+    if not host_header:
+        return None
+    host = host_header.strip()
+    if not host:
+        return None
+    parsed = urlsplit(f"http://{host}")
+    if not parsed.hostname:
+        return None
+    return _normalize_host(parsed.hostname)
+
+
+def _normalize_allowed_host(entry: str) -> str:
+    candidate = entry.strip().lower()
+    if not candidate:
+        return ""
+    if "://" in candidate:
+        parsed = urlsplit(candidate)
+        if parsed.hostname:
+            return _normalize_host(parsed.hostname)
+    if ":" in candidate and not candidate.endswith(":*"):
+        parsed = urlsplit(f"http://{candidate}")
+        if parsed.hostname:
+            return _normalize_host(parsed.hostname)
+    if candidate.endswith(":*"):
+        candidate = candidate[:-2]
+    return _normalize_host(candidate)
+
+
+def _is_host_allowed(host_header: Optional[str], allowed_hosts: list[str]) -> bool:
+    request_host = _normalize_request_host(host_header)
+    if not request_host:
+        return False
+    normalized = {_normalize_allowed_host(entry) for entry in allowed_hosts}
+    return request_host in normalized
+
+
+def _normalize_origin(origin: str) -> Optional[str]:
+    try:
+        parsed = urlsplit(origin)
+    except Exception:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    base = f"{parsed.scheme.lower()}://{_normalize_host(parsed.hostname)}"
+    if parsed.port is not None:
+        return f"{base}:{parsed.port}"
+    return base
+
+
+def _is_origin_allowed(origin: str, allowed_origins: list[str]) -> bool:
+    normalized_origin = _normalize_origin(origin)
+    if not normalized_origin:
+        return False
+
+    for raw in allowed_origins:
+        allowed = raw.strip().lower()
+        if not allowed:
+            continue
+        if allowed == normalized_origin:
+            return True
+        if allowed.endswith(":*"):
+            prefix = allowed[:-2]
+            if normalized_origin.startswith(prefix + ":"):
+                return True
+    return False
+
+
+def _jsonrpc_transport_error(message: str) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "error": {"code": -32000, "message": message},
+        "id": None,
+    }
+
+
+async def run_http_server(
+    handler: MCPHandler,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    *,
+    sse_enabled: bool = False,
+    allowed_hosts: Optional[list[str]] = None,
+    allowed_origins: Optional[list[str]] = None,
+):
     """Run HTTP server with SSE endpoint for MCP."""
     try:
         from aiohttp import web
@@ -241,8 +362,36 @@ async def run_http_server(handler: MCPHandler, host: str = "127.0.0.1", port: in
         print("[ERROR] aiohttp not installed. Run: pip install aiohttp")
         sys.exit(1)
 
+    if allowed_hosts is None:
+        allowed_hosts = ["localhost", "127.0.0.1", "::1"]
+    if allowed_origins is None:
+        allowed_origins = [
+            "http://localhost:*",
+            "http://127.0.0.1:*",
+            "https://localhost:*",
+            "https://127.0.0.1:*",
+        ]
+
     # Store active SSE connections
     sessions: dict[str, asyncio.Queue] = {}
+
+    @web.middleware
+    async def transport_security_middleware(request: web.Request, handler):
+        if request.path != "/health":
+            host_header = request.headers.get("Host")
+            if not _is_host_allowed(host_header, allowed_hosts):
+                return web.json_response(
+                    _jsonrpc_transport_error("Forbidden: invalid Host header"),
+                    status=403,
+                )
+
+            origin = request.headers.get("Origin")
+            if origin and not _is_origin_allowed(origin, allowed_origins):
+                return web.json_response(
+                    _jsonrpc_transport_error("Forbidden: Origin not allowed"),
+                    status=403,
+                )
+        return await handler(request)
 
     async def handle_sse(request: web.Request) -> web.StreamResponse:
         """SSE endpoint for MCP protocol."""
@@ -250,15 +399,20 @@ async def run_http_server(handler: MCPHandler, host: str = "127.0.0.1", port: in
         queue: asyncio.Queue = asyncio.Queue()
         sessions[session_id] = queue
 
+        headers = {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        }
+        origin = request.headers.get("Origin")
+        if origin and _is_origin_allowed(origin, allowed_origins):
+            headers["Access-Control-Allow-Origin"] = origin
+            headers["Vary"] = "Origin"
+
         response = web.StreamResponse(
             status=200,
             reason="OK",
-            headers={
-                "Content-Type": "text/event-stream",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "Access-Control-Allow-Origin": "*",
-            },
+            headers=headers,
         )
         await response.prepare(request)
 
@@ -370,11 +524,18 @@ async def run_http_server(handler: MCPHandler, host: str = "127.0.0.1", port: in
         """Handle streamable HTTP session close requests (DELETE)."""
         return web.Response(status=200, text="OK")
 
-    app = web.Application()
+    async def handle_mcp_get(request: web.Request) -> web.StreamResponse | web.Response:
+        """GET /mcp is either SSE (optional) or 405 (spec-compliant fallback)."""
+        if sse_enabled:
+            return await handle_sse(request)
+        return web.Response(status=405, text="Method Not Allowed", headers={"Allow": "POST, DELETE"})
+
+    app = web.Application(middlewares=[transport_security_middleware])
     app.router.add_get("/sse", handle_sse)
     app.router.add_post("/message", handle_message)
     app.router.add_post("/sse", handle_streamable)  # compatibility for http-first on /sse
     app.router.add_delete("/sse", handle_streamable_delete)
+    app.router.add_get("/mcp", handle_mcp_get)
     app.router.add_post("/mcp", handle_streamable)
     app.router.add_delete("/mcp", handle_streamable_delete)
     app.router.add_post("/rpc", handle_rpc)  # New synchronous endpoint
@@ -430,6 +591,20 @@ def main():
     # --- Resolve host/port from env ---
     host = os.getenv("MCP_HOST", "127.0.0.1")
     port = int(os.getenv("MCP_PORT", "8765"))
+    sse_enabled = _parse_bool_env(os.getenv("MCP_SSE_ENABLED"), False)
+    allowed_hosts = _parse_csv_env(
+        os.getenv("MCP_ALLOWED_HOSTS"),
+        ["localhost", "127.0.0.1", "::1"],
+    )
+    allowed_origins = _parse_csv_env(
+        os.getenv("MCP_ALLOWED_ORIGINS"),
+        [
+            "http://localhost:*",
+            "http://127.0.0.1:*",
+            "https://localhost:*",
+            "https://127.0.0.1:*",
+        ],
+    )
 
     try:
         _ensure_port_free(host, port)
@@ -451,7 +626,18 @@ def main():
         log.warning("Warmup interrupted, continuing anyway...")
 
     try:
-        asyncio.run(run_http_server(handler, host=host, port=port))
+        log.info("MCP transport security: hosts=%s origins=%s", allowed_hosts, allowed_origins)
+        log.info("MCP GET /mcp SSE enabled: %s", sse_enabled)
+        asyncio.run(
+            run_http_server(
+                handler,
+                host=host,
+                port=port,
+                sse_enabled=sse_enabled,
+                allowed_hosts=allowed_hosts,
+                allowed_origins=allowed_origins,
+            )
+        )
     except KeyboardInterrupt:
         log.info("Server stopped.")
     finally:

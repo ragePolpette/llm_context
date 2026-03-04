@@ -126,7 +126,7 @@ def ingest_project_v2(
             chunks = chunk_markdown(text, md_chunk_size, chunk_overlap, min_chunk_chars)
         elif source_type == "code":
             chunks = chunk_code(text, code_chunk_size, min_chunk_chars)
-            header_text = _build_code_header(text, relative_path)
+            header_text = _build_code_header(text, relative_path, language=language)
             if header_text:
                 header_chunk = Chunk(
                     text=header_text,
@@ -312,35 +312,118 @@ _CS_METHOD_RE = re.compile(
     r"(?:static\s+)?(?:async\s+)?[\w<>\[\],\s]+\s+(?P<name>[A-Za-z_]\w*)\s*\(",
     re.MULTILINE,
 )
+_TS_SYMBOL_RE = re.compile(
+    r"^\s*(?:export\s+)?(class|interface|enum|type)\s+(?P<name>[A-Za-z_]\w*)",
+    re.MULTILINE,
+)
+_PY_CLASS_RE = re.compile(
+    r"^\s*class\s+(?P<name>[A-Za-z_]\w*)\s*(?:\(|:)",
+    re.MULTILINE,
+)
+_PY_FUNC_RE = re.compile(
+    r"^\s*(?:async\s+)?def\s+(?P<name>[A-Za-z_]\w*)\s*\(",
+    re.MULTILINE,
+)
+_JS_CLASS_RE = re.compile(
+    r"^\s*(?:export\s+)?class\s+(?P<name>[A-Za-z_$][\w$]*)",
+    re.MULTILINE,
+)
+_JS_FUNCTION_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:async\s+)?function\s+(?P<name>[A-Za-z_$][\w$]*)\s*\(",
+    re.MULTILINE,
+)
+_JS_ASSIGNED_FUNCTION_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Za-z_$][\w$]*)\s*=\s*"
+    r"(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)",
+    re.MULTILINE,
+)
 
 
-def _build_code_header(text: str, relative_path: str) -> str:
-    namespace = _first_match(_CS_NAMESPACE_RE, text)
-    symbols = _extract_symbols(_CS_SYMBOL_RE, text)
-    methods = _extract_methods(_CS_METHOD_RE, text, limit=40)
+def _build_code_header(
+    text: str,
+    relative_path: str,
+    language: Optional[str] = None,
+) -> str:
+    language_norm = (language or "").strip().lower()
+    namespace = (
+        _first_match(_CS_NAMESPACE_RE, text)
+        if language_norm in {"csharp", "aspnet", ""}
+        else ""
+    )
+    symbols = _collect_code_symbols(text, language_norm)
+    path_segments = _path_segments(relative_path)
     lines: list[str] = [f"FILE: {relative_path}"]
+    if language_norm:
+        lines.append(f"LANGUAGE: {language_norm}")
+    if path_segments:
+        lines.append(f"PROJECT: {path_segments[0]}")
+    if len(path_segments) > 1:
+        lines.append(f"SUBPROJECT: {path_segments[1]}")
     if namespace:
         lines.append(f"NAMESPACE: {namespace}")
-    if symbols:
-        classes = [name for kind, name in symbols if kind == "class"]
-        interfaces = [name for kind, name in symbols if kind == "interface"]
-        structs = [name for kind, name in symbols if kind == "struct"]
-        enums = [name for kind, name in symbols if kind == "enum"]
-        if classes:
-            lines.append(f"CLASSES: {', '.join(classes[:30])}")
-        if interfaces:
-            lines.append(f"INTERFACES: {', '.join(interfaces[:30])}")
-        if structs:
-            lines.append(f"STRUCTS: {', '.join(structs[:30])}")
-        if enums:
-            lines.append(f"ENUMS: {', '.join(enums[:30])}")
-    if methods:
-        lines.append(f"METHODS: {', '.join(methods)}")
+    if symbols["classes"]:
+        lines.append(f"CLASSES: {', '.join(symbols['classes'][:30])}")
+    if symbols["interfaces"]:
+        lines.append(f"INTERFACES: {', '.join(symbols['interfaces'][:30])}")
+    if symbols["structs"]:
+        lines.append(f"STRUCTS: {', '.join(symbols['structs'][:30])}")
+    if symbols["enums"]:
+        lines.append(f"ENUMS: {', '.join(symbols['enums'][:30])}")
+    if symbols["types"]:
+        lines.append(f"TYPES: {', '.join(symbols['types'][:30])}")
+    if symbols["methods"]:
+        lines.append(f"METHODS: {', '.join(symbols['methods'][:40])}")
+    if symbols["functions"]:
+        lines.append(f"FUNCTIONS: {', '.join(symbols['functions'][:40])}")
     tokens = _tokenize_path(relative_path)
     if tokens:
         lines.append(f"TOKENS: {' '.join(tokens)}")
     header = "\n".join(lines).strip()
     return header
+
+
+def _collect_code_symbols(text: str, language: str) -> dict[str, list[str]]:
+    classes: list[str] = []
+    interfaces: list[str] = []
+    structs: list[str] = []
+    enums: list[str] = []
+    types: list[str] = []
+    methods: list[str] = []
+    functions: list[str] = []
+
+    if language in {"", "csharp", "aspnet"}:
+        cs_symbols = _extract_symbols(_CS_SYMBOL_RE, text)
+        classes.extend(name for kind, name in cs_symbols if kind == "class")
+        interfaces.extend(name for kind, name in cs_symbols if kind == "interface")
+        structs.extend(name for kind, name in cs_symbols if kind == "struct")
+        enums.extend(name for kind, name in cs_symbols if kind == "enum")
+        methods.extend(_extract_methods(_CS_METHOD_RE, text, limit=80))
+
+    if language in {"", "typescript"}:
+        ts_symbols = _extract_symbols(_TS_SYMBOL_RE, text)
+        classes.extend(name for kind, name in ts_symbols if kind == "class")
+        interfaces.extend(name for kind, name in ts_symbols if kind == "interface")
+        enums.extend(name for kind, name in ts_symbols if kind == "enum")
+        types.extend(name for kind, name in ts_symbols if kind == "type")
+
+    if language in {"", "python"}:
+        classes.extend(_extract_methods(_PY_CLASS_RE, text, limit=60))
+        functions.extend(_extract_methods(_PY_FUNC_RE, text, limit=120))
+
+    if language in {"", "javascript", "typescript"}:
+        classes.extend(_extract_methods(_JS_CLASS_RE, text, limit=60))
+        functions.extend(_extract_methods(_JS_FUNCTION_RE, text, limit=120))
+        functions.extend(_extract_methods(_JS_ASSIGNED_FUNCTION_RE, text, limit=120))
+
+    return {
+        "classes": _dedupe(classes),
+        "interfaces": _dedupe(interfaces),
+        "structs": _dedupe(structs),
+        "enums": _dedupe(enums),
+        "types": _dedupe(types),
+        "methods": _dedupe(methods),
+        "functions": _dedupe(functions),
+    }
 
 
 def _first_match(pattern: re.Pattern[str], text: str) -> str:
@@ -369,6 +452,13 @@ def _extract_methods(
         if len(names) >= limit:
             break
     return _dedupe(names)
+
+
+def _path_segments(path: str) -> list[str]:
+    segments = [item for item in re.split(r"[\\/]+", path.strip()) if item]
+    if segments and "." in segments[-1]:
+        segments = segments[:-1]
+    return segments[:4]
 
 
 def _tokenize_path(path: str) -> list[str]:

@@ -159,7 +159,9 @@ class MCPHandler:
             return {
                 "jsonrpc": "2.0",
                 "id": msg_id,
-                "result": {"tools": [tool_rag_context(), tool_rag_search()]},
+                "result": {
+                    "tools": [tool_rag_context(), tool_rag_search(), tool_context_info()]
+                },
             }
 
         # Capability endpoints often requested by newer MCP clients
@@ -193,6 +195,8 @@ class MCPHandler:
                     payload = self._run_rag_context(args)
                 elif name == "rag_search":
                     payload = self._run_rag_search(args)
+                elif name == "context_info":
+                    payload = self._run_context_info()
                 else:
                     raise ValueError(f"Unknown tool: {name}")
             except Exception as exc:
@@ -298,6 +302,21 @@ class MCPHandler:
         payload.pop("context", None)
         return payload
 
+    def _run_context_info(self) -> dict[str, Any]:
+        """Describe scope and boundaries of llm-context MCP."""
+        return {
+            "server": "llm-context-mcp",
+            "purpose": "Recupero contesto da codice/documenti indicizzati (RAG).",
+            "capabilities": [
+                "rag_context: contesto formattato per analisi codice/documenti",
+                "rag_search: risultati raw di retrieval semantico/keyword",
+            ],
+            "boundaries": [
+                "NON e' un sistema di memoria operativa persistente",
+                "NON sostituisce llm-memory per decisioni/preferenze operative",
+            ],
+        }
+
     def _get_embedder(self, args: dict[str, Any], embedding_dim: int) -> Embedder:
         """Get or create embedder with caching."""
         name = str(args.get("embedder", self._default_embedder)).strip().lower()
@@ -327,7 +346,10 @@ def tool_rag_context() -> dict[str, Any]:
     """Return the rag_context tool schema."""
     return {
         "name": "rag_context",
-        "description": "Retrieve formatted RAG context from Postgres + pgvector.",
+        "description": (
+            "Recupera contesto RAG da codice/documenti indicizzati. "
+            "Usare solo per context retrieval tecnico; non salva memorie operative."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -358,8 +380,20 @@ def tool_rag_search() -> dict[str, Any]:
     """Return the rag_search tool schema."""
     tool = tool_rag_context()
     tool["name"] = "rag_search"
-    tool["description"] = "Retrieve raw RAG matches (no formatted context)."
+    tool["description"] = (
+        "Recupera match RAG raw su codice/documenti (no contesto formattato). "
+        "Non e' un memory store operativo."
+    )
     return tool
+
+
+def tool_context_info() -> dict[str, Any]:
+    """Return tool schema describing llm-context purpose and boundaries."""
+    return {
+        "name": "context_info",
+        "description": "Spiega scopo/limiti del MCP llm-context.",
+        "inputSchema": {"type": "object", "properties": {}},
+    }
 
 
 def format_tool_text(name: str, args: dict[str, Any], payload: dict[str, Any]) -> str:
