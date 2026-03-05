@@ -184,6 +184,37 @@ def init_db_v2(conn: Any, embedding_dim: int, ivfflat_lists: int) -> None:
             """
         ).format(lists=sql.Literal(lists))
         cur.execute(ivfflat_sql)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS symbols (
+                symbol_id  UUID PRIMARY KEY,
+                doc_id     UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+                repo_id    TEXT NOT NULL,
+                name       TEXT NOT NULL,
+                kind       TEXT NOT NULL,
+                namespace  TEXT,
+                line_start INT NOT NULL,
+                line_end   INT,
+                signature  TEXT,
+                language   TEXT
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS symbols_name_lower_idx ON symbols (lower(name));
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS symbols_doc_idx ON symbols (doc_id);
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS symbols_repo_kind_idx ON symbols (repo_id, kind);
+            """
+        )
     conn.commit()
     _register_vector_safe(conn)
 

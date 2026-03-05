@@ -68,6 +68,7 @@ class AppConfig:
     default_doc_type: str = "code"
     exclude_globs: list[str] = field(default_factory=list)
     never_index_ext: list[str] = field(default_factory=list)
+    symbol_search_enabled: bool = True
 
 
 def parse_csv_list(value: Optional[str]) -> list[str]:
