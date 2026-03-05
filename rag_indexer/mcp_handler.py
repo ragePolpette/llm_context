@@ -62,6 +62,12 @@ class MCPHandler:
         )
         self._default_project_id = os.getenv("LLM_CONTEXT_PROJECT_ID", "myproj")
         self._default_embedder = os.getenv("LLM_CONTEXT_EMBEDDER", "local-st")
+        self._allow_embedder_fallback = parse_bool(
+            os.getenv("LLM_CONTEXT_ALLOW_EMBEDDER_FALLBACK", "true")
+        )
+        self._fallback_embedder = str(
+            os.getenv("LLM_CONTEXT_FALLBACK_EMBEDDER", "local-hash")
+        ).strip().lower()
         self._default_local_model = os.getenv(
             "LLM_CONTEXT_LOCAL_MODEL",
             "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
@@ -331,7 +337,20 @@ class MCPHandler:
             if name == "local-hash":
                 embedder = LocalHashEmbedder(embedding_dim)
             elif name in {"local-st", "sentence-transformers", "local"}:
-                embedder = LocalSentenceTransformerEmbedder(model_name=local_model)
+                try:
+                    embedder = LocalSentenceTransformerEmbedder(model_name=local_model)
+                except Exception as exc:
+                    if not self._allow_embedder_fallback:
+                        raise
+                    fallback_name = self._fallback_embedder
+                    if fallback_name != "local-hash":
+                        raise RuntimeError(
+                            f"Embedder fallback '{fallback_name}' unsupported"
+                        ) from exc
+                    sys.stderr.write(
+                        f"[WARN] local-st unavailable ({exc}); fallback to local-hash dim={embedding_dim}\n"
+                    )
+                    embedder = LocalHashEmbedder(embedding_dim)
             elif name == "dummy":
                 embedder = DummyEmbedder()
             else:
