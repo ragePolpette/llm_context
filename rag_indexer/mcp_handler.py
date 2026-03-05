@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from rag_indexer.agent_context import build_context
 from rag_indexer.config import load_config
+from rag_indexer.db import get_connection
 from rag_indexer.embedder import (
     DummyEmbedder,
     Embedder,
@@ -23,6 +24,7 @@ from rag_indexer.embedder import (
     LocalSentenceTransformerEmbedder,
 )
 from rag_indexer.path_utils import parse_bool, resolve_path_prefix
+from rag_indexer.store import RagStore
 
 
 def load_dotenv() -> None:
@@ -166,7 +168,12 @@ class MCPHandler:
                 "jsonrpc": "2.0",
                 "id": msg_id,
                 "result": {
-                    "tools": [tool_rag_context(), tool_rag_search(), tool_context_info()]
+                    "tools": [
+                        tool_rag_context(),
+                        tool_rag_search(),
+                        tool_context_info(),
+                        tool_symbol_search(),
+                    ]
                 },
             }
 
@@ -203,6 +210,8 @@ class MCPHandler:
                     payload = self._run_rag_search(args)
                 elif name == "context_info":
                     payload = self._run_context_info()
+                elif name == "symbol_search":
+                    payload = self._run_symbol_search(args)
                 else:
                     raise ValueError(f"Unknown tool: {name}")
             except Exception as exc:
@@ -316,11 +325,45 @@ class MCPHandler:
             "capabilities": [
                 "rag_context: contesto formattato per analisi codice/documenti",
                 "rag_search: risultati raw di retrieval semantico/keyword",
+                "symbol_search: lookup esatto/prefisso simboli per nome (class/function/method/...)",
             ],
             "boundaries": [
                 "NON e' un sistema di memoria operativa persistente",
                 "NON sostituisce llm-memory per decisioni/preferenze operative",
             ],
+        }
+
+    def _run_symbol_search(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Execute symbol_search tool."""
+        name = args.get("name")
+        if not name:
+            raise ValueError("'name' is required for symbol_search")
+        dsn = args.get("dsn") or self._default_dsn
+        project_id = args.get("project_id") or self._default_project_id
+        kind = args.get("kind") or None
+        language = args.get("language") or None
+        exact = parse_bool(str(args.get("exact", False)))
+        limit = int(args.get("limit", 20))
+        embedding_dim = int(args.get("embedding_dim", self._default_embedding_dim))
+
+        conn = get_connection(dsn)
+        try:
+            store = RagStore(conn, embedding_dim)
+            results = store.query_symbols(
+                name=name,
+                repo_id=project_id,
+                kind=kind,
+                language=language,
+                exact=exact,
+                limit=limit,
+            )
+        finally:
+            conn.close()
+
+        return {
+            "query": {"name": name, "kind": kind, "language": language, "exact": exact},
+            "count": len(results),
+            "results": results,
         }
 
     def _get_embedder(self, args: dict[str, Any], embedding_dim: int) -> Embedder:
@@ -412,6 +455,43 @@ def tool_context_info() -> dict[str, Any]:
         "name": "context_info",
         "description": "Spiega scopo/limiti del MCP llm-context.",
         "inputSchema": {"type": "object", "properties": {}},
+    }
+
+
+def tool_symbol_search() -> dict[str, Any]:
+    """Return the symbol_search tool schema."""
+    return {
+        "name": "symbol_search",
+        "description": (
+            "Cerca simboli (class, function, method, interface, enum, struct, type) per nome "
+            "nel codice indicizzato. Restituisce line_start, line_end, signature e path del file."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Nome (o prefisso) del simbolo da cercare",
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Filtro tipo: class | function | method | interface | enum | struct | type",
+                },
+                "project_id": {"type": "string"},
+                "language": {
+                    "type": "string",
+                    "description": "Filtro linguaggio: python | javascript | typescript | csharp",
+                },
+                "exact": {
+                    "type": "boolean",
+                    "description": "Se true: match esatto (case-insensitive); se false (default): match prefisso",
+                },
+                "limit": {"type": "integer"},
+                "dsn": {"type": "string"},
+                "embedding_dim": {"type": "integer"},
+            },
+        },
     }
 
 

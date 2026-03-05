@@ -14,7 +14,7 @@ from typing import Any, Optional
 from .chunking import Chunk, chunk_code, chunk_markdown, chunk_text
 from .embedder import Embedder
 from .scanner import get_source_type, read_text, scan_files
-from .store import ChunkRecord, DocumentRecord, EmbeddingRecord, RagStore
+from .store import ChunkRecord, DocumentRecord, EmbeddingRecord, RagStore, SymbolRecord
 
 
 @dataclass
@@ -52,6 +52,7 @@ def ingest_project_v2(
     min_chunk_chars: int,
     incremental: bool,
     logger: logging.Logger,
+    symbol_search_enabled: bool = True,
 ) -> IngestStats:
     stats = IngestStats()
     start_time = time.monotonic()
@@ -121,6 +122,30 @@ def ingest_project_v2(
 
         doc_id = store.upsert_document(doc_record)
         store.delete_chunks(doc_id)
+
+        if symbol_search_enabled and source_type == "code":
+            try:
+                from .symbol_extractor import extract_symbols
+                symbol_infos = extract_symbols(text, language or "")
+                store.delete_symbols(doc_id)
+                symbol_records = [
+                    SymbolRecord(
+                        doc_id=doc_id,
+                        repo_id=repo_id,
+                        name=si.name,
+                        kind=si.kind,
+                        namespace=si.namespace,
+                        line_start=si.line_start,
+                        line_end=si.line_end,
+                        signature=si.signature,
+                        language=language,
+                    )
+                    for si in symbol_infos
+                ]
+                if symbol_records:
+                    store.insert_symbols(symbol_records)
+            except Exception as _sym_exc:
+                logger.warning("Symbol extraction failed for %s: %s", path, _sym_exc)
 
         if source_type == "md":
             chunks = chunk_markdown(text, md_chunk_size, chunk_overlap, min_chunk_chars)

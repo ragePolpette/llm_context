@@ -12,6 +12,20 @@ from .db import execute_many_params, execute_params
 
 
 @dataclass
+class SymbolRecord:
+    doc_id: uuid.UUID
+    repo_id: str
+    name: str
+    kind: str
+    namespace: Optional[str] = None
+    line_start: int = 0
+    line_end: Optional[int] = None
+    signature: Optional[str] = None
+    language: Optional[str] = None
+    symbol_id: uuid.UUID = field(default_factory=uuid.uuid4)
+
+
+@dataclass
 class DocumentRecord:
     repo_id: str
     path: str
@@ -397,6 +411,95 @@ class RagStore:
                 }
             )
         return results
+
+
+    def delete_symbols(self, doc_id: uuid.UUID) -> int:
+        sql_text = "DELETE FROM symbols WHERE doc_id = @Valore0"
+        with self.conn.cursor() as cur:
+            execute_params(cur, sql_text, [doc_id])
+            deleted = cur.rowcount or 0
+        self.conn.commit()
+        return deleted
+
+    def insert_symbols(self, records: list[SymbolRecord]) -> int:
+        if not records:
+            return 0
+        sql_text = (
+            "INSERT INTO symbols ("
+            "symbol_id, doc_id, repo_id, name, kind, namespace, "
+            "line_start, line_end, signature, language"
+            ") VALUES ("
+            "@Valore0, @Valore1, @Valore2, @Valore3, @Valore4, @Valore5, "
+            "@Valore6, @Valore7, @Valore8, @Valore9"
+            ") ON CONFLICT DO NOTHING"
+        )
+        rows = [
+            [r.symbol_id, r.doc_id, r.repo_id, r.name, r.kind, r.namespace,
+             r.line_start, r.line_end, r.signature, r.language]
+            for r in records
+        ]
+        with self.conn.cursor() as cur:
+            execute_many_params(cur, sql_text, rows)
+        self.conn.commit()
+        return len(records)
+
+    def query_symbols(
+        self,
+        name: str,
+        repo_id: Optional[str] = None,
+        kind: Optional[str] = None,
+        language: Optional[str] = None,
+        exact: bool = False,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = []
+
+        def add_param(value: Any) -> str:
+            placeholder = f"@Valore{len(params)}"
+            params.append(value)
+            return placeholder
+
+        if exact:
+            name_cond = f"lower(s.name) = lower({add_param(name)})"
+        else:
+            name_cond = f"lower(s.name) LIKE lower({add_param(name)}) || '%'"
+
+        conditions = [name_cond]
+        if repo_id:
+            conditions.append(f"s.repo_id = {add_param(repo_id)}")
+        if kind:
+            conditions.append(f"s.kind = {add_param(kind)}")
+        if language:
+            conditions.append(f"s.language = {add_param(language)}")
+
+        limit_ph = add_param(limit)
+        sql_text = (
+            "SELECT s.symbol_id, s.doc_id, s.repo_id, s.name, s.kind, s.namespace, "
+            "s.line_start, s.line_end, s.signature, s.language, d.path "
+            "FROM symbols s "
+            "JOIN documents d ON d.doc_id = s.doc_id "
+            "WHERE " + " AND ".join(conditions) +
+            f" ORDER BY s.name, s.line_start LIMIT {limit_ph}"
+        )
+        with self.conn.cursor() as cur:
+            execute_params(cur, sql_text, params)
+            rows = cur.fetchall()
+        return [
+            {
+                "symbol_id": row[0],
+                "doc_id": row[1],
+                "repo_id": row[2],
+                "name": row[3],
+                "kind": row[4],
+                "namespace": row[5],
+                "line_start": row[6],
+                "line_end": row[7],
+                "signature": row[8],
+                "language": row[9],
+                "source_path": row[10],
+            }
+            for row in rows
+        ]
 
 
 def _validate_embedding(embedding: list[float], dim: int) -> None:
