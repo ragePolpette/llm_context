@@ -462,7 +462,7 @@ class RagStore:
         if exact:
             name_cond = f"lower(s.name) = lower({add_param(name)})"
         else:
-            name_cond = f"lower(s.name) LIKE lower({add_param(name)}) || '%'"
+            name_cond = f"lower(s.name) LIKE lower({add_param(name + '%')})"
 
         conditions = [name_cond]
         if repo_id:
