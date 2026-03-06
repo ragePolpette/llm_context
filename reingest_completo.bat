@@ -11,7 +11,10 @@ if "%PYTHON%"=="" (
   set "PYTHON_EXE=%PYTHON%"
 )
 
-if "%LLM_CONTEXT_DSN%"=="" set "LLM_CONTEXT_DSN=postgresql://postgres:postgres@localhost:5432/postgres"
+if "%LLM_CONTEXT_DSN%"=="" (
+  echo [ERRORE] LLM_CONTEXT_DSN non impostata.
+  exit /b 1
+)
 if "%LLM_CONTEXT_PROJECT_ID%"=="" set "LLM_CONTEXT_PROJECT_ID=myproj"
 if "%LLM_CONTEXT_EMBEDDER%"=="" set "LLM_CONTEXT_EMBEDDER=local-st"
 if "%LLM_CONTEXT_EMBEDDING_DIM%"=="" set "LLM_CONTEXT_EMBEDDING_DIM=384"

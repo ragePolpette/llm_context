@@ -7,7 +7,10 @@ echo.
 cd /d "%~dp0"
 
 :: Imposta variabili d'ambiente
-set LLM_CONTEXT_DSN=postgresql://postgres:postgres@localhost:5432/postgres
+if "%LLM_CONTEXT_DSN%"=="" (
+  echo [ERRORE] Imposta LLM_CONTEXT_DSN prima di avviare il server.
+  exit /b 1
+)
 set LLM_CONTEXT_PROJECT_ID=myproj
 set LLM_CONTEXT_EMBEDDER=local-st
 set LLM_CONTEXT_EMBEDDING_DIM=384
