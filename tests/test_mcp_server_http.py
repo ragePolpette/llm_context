@@ -1,4 +1,5 @@
 import types
+from logging.handlers import RotatingFileHandler
 
 import mcp_server_http
 from mcp_server_http import _coerce_rpc_message
@@ -102,3 +103,37 @@ def test_non_windows_kill_does_not_call_taskkill(monkeypatch):
 
     assert mcp_server_http._kill_old_server(555) is True
     assert calls == []
+
+
+def test_configure_http_logging_uses_rotating_file_handler(monkeypatch, tmp_path):
+    log_path = tmp_path / "mcp-http.log"
+    monkeypatch.setenv("LLM_CONTEXT_HTTP_LOG_PATH", str(log_path))
+    monkeypatch.setenv("LLM_CONTEXT_HTTP_LOG_MAX_BYTES", "2048")
+    monkeypatch.setenv("LLM_CONTEXT_HTTP_LOG_BACKUP_COUNT", "4")
+
+    root_logger = mcp_server_http.logging.getLogger()
+    original_handlers = list(root_logger.handlers)
+
+    try:
+        mcp_server_http._configure_http_logging()
+
+        rotating = [
+            handler
+            for handler in root_logger.handlers
+            if isinstance(handler, RotatingFileHandler)
+        ]
+        assert len(rotating) == 1
+        assert rotating[0].baseFilename == str(log_path)
+        assert rotating[0].maxBytes == 2048
+        assert rotating[0].backupCount == 4
+        assert any(
+            isinstance(handler, mcp_server_http.logging.StreamHandler)
+            and not isinstance(handler, RotatingFileHandler)
+            for handler in root_logger.handlers
+        )
+    finally:
+        for handler in list(root_logger.handlers):
+            handler.close()
+        root_logger.handlers.clear()
+        for handler in original_handlers:
+            root_logger.addHandler(handler)

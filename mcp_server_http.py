@@ -22,7 +22,6 @@ it will be killed automatically before binding.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import os
@@ -31,6 +30,7 @@ import socket
 import sys
 import threading
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlsplit
@@ -295,6 +295,41 @@ def _get_process_command(pid: int) -> str:
 
     result = _run_subprocess(["ps", "-p", str(pid), "-o", "command="])
     return result.stdout
+
+
+def _configure_http_logging() -> None:
+    root_logger = logging.getLogger()
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
+    log_path = Path(
+        os.getenv(
+            "LLM_CONTEXT_HTTP_LOG_PATH",
+            str(_ROOT_DIR / "logs" / "mcp_server_http.log"),
+        )
+    ).expanduser()
+    if not log_path.is_absolute():
+        log_path = (_ROOT_DIR / log_path).resolve()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    max_bytes = int(os.getenv("LLM_CONTEXT_HTTP_LOG_MAX_BYTES", str(1_048_576)))
+    backup_count = int(os.getenv("LLM_CONTEXT_HTTP_LOG_BACKUP_COUNT", "3"))
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+
+    file_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+
+    root_logger.handlers.clear()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(stream_handler)
+    root_logger.addHandler(file_handler)
 
 
 # ============================================================================
@@ -692,10 +727,7 @@ async def run_http_server(
 
 
 def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    _configure_http_logging()
 
     log.info("=" * 50)
     log.info("  LLM Context MCP Server (HTTP/SSE)")
