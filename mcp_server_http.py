@@ -22,6 +22,7 @@ it will be killed automatically before binding.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -43,6 +44,7 @@ if str(_ROOT_DIR) not in sys.path:
 from rag_indexer.mcp_handler import MCPHandler, UUIDEncoder, tool_rag_context
 
 log = logging.getLogger("mcp_server_http")
+_IS_WINDOWS = os.name == "nt"
 
 # ---------------------------------------------------------------------------
 # Single-instance guard (file lock)
@@ -55,7 +57,6 @@ def _acquire_instance_lock() -> bool:
     """Try to acquire a file-based single-instance lock.
     If a stale lock exists from an old server, kill it and retry."""
     global _lock_file_handle
-    import msvcrt
 
     def _try_lock() -> bool:
         global _lock_file_handle
@@ -68,7 +69,7 @@ def _acquire_instance_lock() -> bool:
                 _lock_file_handle.write("0")
                 _lock_file_handle.flush()
             _lock_file_handle.seek(0)
-            msvcrt.locking(_lock_file_handle.fileno(), msvcrt.LK_NBLCK, 1)
+            _lock_file(_lock_file_handle)
             _lock_file_handle.seek(0)
             _lock_file_handle.truncate()
             _lock_file_handle.write(str(os.getpid()))
@@ -113,10 +114,9 @@ def _release_instance_lock() -> None:
     """Release the single-instance lock."""
     global _lock_file_handle
     if _lock_file_handle:
-        import msvcrt
         try:
             _lock_file_handle.seek(0)
-            msvcrt.locking(_lock_file_handle.fileno(), msvcrt.LK_UNLCK, 1)
+            _unlock_file(_lock_file_handle)
         except (OSError, IOError):
             pass
         _lock_file_handle.close()
@@ -146,16 +146,20 @@ def _is_port_available(host: str, port: int) -> bool:
 def _get_port_owner_pid(port: int) -> Optional[int]:
     """Return the PID listening on *port*, or None."""
     try:
-        import subprocess
-        result = subprocess.run(
-            ["netstat", "-ano"],
-            capture_output=True, text=True, timeout=5,
-        )
-        for line in result.stdout.splitlines():
-            if f":{port}" in line and "LISTENING" in line:
-                parts = line.split()
-                if parts:
-                    return int(parts[-1])
+        if _IS_WINDOWS:
+            result = _run_subprocess(["netstat", "-ano"])
+            lines = result.stdout.splitlines()
+            for line in lines:
+                if f":{port}" in line and "LISTENING" in line:
+                    parts = line.split()
+                    if parts:
+                        return int(parts[-1])
+        else:
+            result = _run_subprocess(["lsof", "-ti", f"tcp:{port}"])
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if line:
+                    return int(line)
     except Exception:
         pass
     return None
@@ -164,13 +168,7 @@ def _get_port_owner_pid(port: int) -> Optional[int]:
 def _is_own_server_process(pid: int) -> bool:
     """Check if *pid* is a Python process running this same server script."""
     try:
-        import subprocess
-        result = subprocess.run(
-            ["wmic", "process", "where", f"ProcessId={pid}",
-             "get", "CommandLine", "/format:list"],
-            capture_output=True, text=True, timeout=5,
-        )
-        cmdline = result.stdout.lower()
+        cmdline = _get_process_command(pid).lower()
         return "python" in cmdline and "mcp_server_http" in cmdline
     except Exception:
         return False
@@ -183,15 +181,14 @@ def _kill_old_server(pid: int) -> bool:
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError:
-        # process already dead or access denied — try taskkill as fallback
-        try:
-            import subprocess
-            subprocess.run(
-                ["taskkill", "/F", "/PID", str(pid)],
-                capture_output=True, timeout=5,
-            )
-        except Exception as exc:
-            log.error("Failed to kill PID %d: %s", pid, exc)
+        if _IS_WINDOWS:
+            # process already dead or access denied — try taskkill as fallback
+            try:
+                _run_subprocess(["taskkill", "/F", "/PID", str(pid)])
+            except Exception as exc:
+                log.error("Failed to kill PID %d: %s", pid, exc)
+                return False
+        else:
             return False
 
     # Wait for process to actually exit
@@ -243,6 +240,61 @@ def _ensure_port_free(host: str, port: int) -> None:
         f"Port {port} still busy after killing PID {owner_pid}. "
         f"It may be in TIME_WAIT state — wait 30s or use a different port."
     )
+
+
+def _lock_file(file_obj) -> None:
+    if _IS_WINDOWS:
+        import msvcrt
+
+        msvcrt.locking(file_obj.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(file_obj.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file(file_obj) -> None:
+    if _IS_WINDOWS:
+        import msvcrt
+
+        msvcrt.locking(file_obj.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(file_obj.fileno(), fcntl.LOCK_UN)
+
+
+def _run_subprocess(command: list[str]):
+    import subprocess
+
+    return subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+
+
+def _get_process_command(pid: int) -> str:
+    if _IS_WINDOWS:
+        result = _run_subprocess(
+            [
+                "wmic",
+                "process",
+                "where",
+                f"ProcessId={pid}",
+                "get",
+                "CommandLine",
+                "/format:list",
+            ]
+        )
+        return result.stdout
+
+    result = _run_subprocess(["ps", "-p", str(pid), "-o", "command="])
+    return result.stdout
 
 
 # ============================================================================

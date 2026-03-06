@@ -1,3 +1,6 @@
+import types
+
+import mcp_server_http
 from mcp_server_http import _coerce_rpc_message
 
 
@@ -50,3 +53,52 @@ def test_tools_call_requires_object_arguments():
     else:
         raise AssertionError("Expected ValueError for invalid tools/call arguments")
 
+
+def test_non_windows_port_owner_lookup_uses_lsof(monkeypatch):
+    calls = []
+
+    def fake_run_subprocess(command):
+        calls.append(command)
+        return types.SimpleNamespace(stdout="4321\n")
+
+    monkeypatch.setattr(mcp_server_http, "_IS_WINDOWS", False)
+    monkeypatch.setattr(mcp_server_http, "_run_subprocess", fake_run_subprocess)
+
+    assert mcp_server_http._get_port_owner_pid(8765) == 4321
+    assert calls == [["lsof", "-ti", "tcp:8765"]]
+
+
+def test_non_windows_process_lookup_uses_ps(monkeypatch):
+    calls = []
+
+    def fake_run_subprocess(command):
+        calls.append(command)
+        return types.SimpleNamespace(stdout="python mcp_server_http.py")
+
+    monkeypatch.setattr(mcp_server_http, "_IS_WINDOWS", False)
+    monkeypatch.setattr(mcp_server_http, "_run_subprocess", fake_run_subprocess)
+
+    assert mcp_server_http._is_own_server_process(321) is True
+    assert calls == [["ps", "-p", "321", "-o", "command="]]
+
+
+def test_non_windows_kill_does_not_call_taskkill(monkeypatch):
+    calls = []
+    attempts = {"count": 0}
+
+    def fake_run_subprocess(command):
+        calls.append(command)
+        return types.SimpleNamespace(stdout="")
+
+    def fake_kill(pid, signal_number):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return None
+        raise OSError("process exited")
+
+    monkeypatch.setattr(mcp_server_http, "_IS_WINDOWS", False)
+    monkeypatch.setattr(mcp_server_http, "_run_subprocess", fake_run_subprocess)
+    monkeypatch.setattr(mcp_server_http.os, "kill", fake_kill)
+
+    assert mcp_server_http._kill_old_server(555) is True
+    assert calls == []
