@@ -58,10 +58,7 @@ class MCPHandler:
             config_path = str(self._project_root / "config.yaml")
         self._config = load_config(config_path)
         self._embedder_lock = threading.Lock()
-        self._default_dsn = os.getenv(
-            "LLM_CONTEXT_DSN",
-            "postgresql://postgres:postgres@localhost:5432/postgres",
-        )
+        self._default_dsn = self._require_default_dsn()
         self._default_project_id = os.getenv("LLM_CONTEXT_PROJECT_ID", "myproj")
         self._default_embedder = os.getenv("LLM_CONTEXT_EMBEDDER", "local-st")
         self._allow_embedder_fallback = parse_bool(
@@ -83,6 +80,12 @@ class MCPHandler:
         # Start warmup in background
         sys.stderr.write("[INFO] Starting embedder warmup...\n")
         threading.Thread(target=self._warmup_embedder, daemon=True).start()
+
+    def _require_default_dsn(self) -> str:
+        dsn = str(os.getenv("LLM_CONTEXT_DSN", "")).strip()
+        if not dsn:
+            raise RuntimeError("LLM_CONTEXT_DSN is required for llm-context MCP")
+        return dsn
 
     def _configure_local_model_dirs(self) -> None:
         """Force local model/cache directories under the MCP root by default."""
@@ -253,7 +256,6 @@ class MCPHandler:
         query_embedding = args.get("query_embedding")
         if query_text is None and query_embedding is None:
             raise ValueError("query_text or query_embedding is required")
-        dsn = args.get("dsn") or self._default_dsn
         project_id = args.get("project_id") or self._default_project_id
         top_k = int(args.get("top_k", 8))
         path_prefix = args.get("path_prefix")
@@ -275,7 +277,7 @@ class MCPHandler:
         )
 
         context, results = build_context(
-            dsn=dsn,
+            dsn=self._default_dsn,
             embedder=embedder,
             embedding_dim=embedding_dim,
             project_id=project_id,
@@ -338,7 +340,6 @@ class MCPHandler:
         name = args.get("name")
         if not name:
             raise ValueError("'name' is required for symbol_search")
-        dsn = args.get("dsn") or self._default_dsn
         project_id = args.get("project_id") or self._default_project_id
         kind = args.get("kind") or None
         language = args.get("language") or None
@@ -346,7 +347,7 @@ class MCPHandler:
         limit = int(args.get("limit", 20))
         embedding_dim = int(args.get("embedding_dim", self._default_embedding_dim))
 
-        conn = get_connection(dsn)
+        conn = get_connection(self._default_dsn)
         try:
             store = RagStore(conn, embedding_dim)
             results = store.query_symbols(
@@ -417,7 +418,6 @@ def tool_rag_context() -> dict[str, Any]:
             "properties": {
                 "query_text": {"type": "string"},
                 "query_embedding": {"type": "array", "items": {"type": "number"}},
-                "dsn": {"type": "string"},
                 "project_id": {"type": "string"},
                 "top_k": {"type": "integer"},
                 "path_prefix": {"type": "string"},
@@ -488,7 +488,6 @@ def tool_symbol_search() -> dict[str, Any]:
                     "description": "Se true: match esatto (case-insensitive); se false (default): match prefisso",
                 },
                 "limit": {"type": "integer"},
-                "dsn": {"type": "string"},
                 "embedding_dim": {"type": "integer"},
             },
         },
