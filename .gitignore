@@ -55,6 +55,9 @@ models/
 *.crt
 *.cer
 
+# Local docs (untracked)
+docs/
+
 # IDE / OS
 .idea/
 .vscode/
