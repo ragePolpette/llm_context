@@ -161,6 +161,9 @@ set MCP_PORT=8765
 set MCP_SSE_ENABLED=false
 set MCP_ALLOWED_HOSTS=localhost,127.0.0.1,::1
 set MCP_ALLOWED_ORIGINS=http://localhost:*,http://127.0.0.1:*,https://localhost:*,https://127.0.0.1:*
+set LLM_CONTEXT_HTTP_LOG_PATH=logs/mcp_server_http.log
+set LLM_CONTEXT_HTTP_LOG_MAX_BYTES=1048576
+set LLM_CONTEXT_HTTP_LOG_BACKUP_COUNT=3
 ```
 
 Valori chiave (gia' impostati per uso locale):
@@ -169,6 +172,9 @@ Valori chiave (gia' impostati per uso locale):
 - `include_dirs`: scope di indicizzazione (vedi sotto)
 - `assets_template_only: true`
 - `scope_map`: parole chiave -> path prefix per auto-scope nelle query
+- `LLM_CONTEXT_HTTP_LOG_PATH`: file log del server HTTP con rotazione
+- `LLM_CONTEXT_HTTP_LOG_MAX_BYTES`: dimensione massima di ogni file log prima della rotazione
+- `LLM_CONTEXT_HTTP_LOG_BACKUP_COUNT`: numero di file log storici mantenuti
 
 ### Parametri principali (spiegazione)
 
