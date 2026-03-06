@@ -88,6 +88,50 @@ def test_symbol_search_uses_configured_default_dsn(monkeypatch, no_warmup):
     assert payload["count"] == 1
 
 
+def test_symbol_search_uses_pool_when_available(monkeypatch, no_warmup):
+    captured = {}
+
+    class FakeConn:
+        pass
+
+    class FakePoolContext:
+        def __enter__(self):
+            captured["entered"] = True
+            return FakeConn()
+
+        def __exit__(self, exc_type, exc, tb):
+            captured["exited"] = True
+            return False
+
+    class FakePool:
+        def connection(self):
+            captured["used_pool"] = True
+            return FakePoolContext()
+
+    class FakeStore:
+        def __init__(self, conn, embedding_dim):
+            captured["embedding_dim"] = embedding_dim
+
+        def query_symbols(self, **kwargs):
+            captured["query"] = kwargs
+            return [{"name": kwargs["name"]}]
+
+    def unexpected_get_connection(dsn):
+        raise AssertionError("fallback connection path should not be used when pool exists")
+
+    monkeypatch.setattr(mcp_handler_module, "get_pool", lambda dsn: FakePool())
+    monkeypatch.setattr(mcp_handler_module, "get_connection", unexpected_get_connection)
+    monkeypatch.setattr(mcp_handler_module, "RagStore", FakeStore)
+
+    handler = MCPHandler()
+    payload = handler._run_symbol_search({"name": "MenuService"})
+
+    assert captured["used_pool"] is True
+    assert captured["entered"] is True
+    assert captured["exited"] is True
+    assert payload["count"] == 1
+
+
 def test_rag_context_rejects_oversized_query_embedding(monkeypatch, no_warmup):
     handler = MCPHandler()
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
