@@ -1,6 +1,8 @@
 import types
 from logging.handlers import RotatingFileHandler
 
+import pytest
+
 import mcp_server_http
 from mcp_server_http import _coerce_rpc_message
 
@@ -53,6 +55,20 @@ def test_tools_call_requires_object_arguments():
         assert "params.arguments" in str(exc)
     else:
         raise AssertionError("Expected ValueError for invalid tools/call arguments")
+
+
+def test_tools_call_rag_context_rejects_unknown_arguments():
+    with pytest.raises(ValueError, match="Unsupported /rpc rag_context arguments"):
+        _coerce_rpc_message(
+            {
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": "rag_context",
+                    "arguments": {"query_text": "bpofh", "dsn": "evil"},
+                },
+            }
+        )
 
 
 def test_non_windows_port_owner_lookup_uses_lsof(monkeypatch):
@@ -111,15 +127,15 @@ def test_configure_http_logging_uses_rotating_file_handler(monkeypatch, tmp_path
     monkeypatch.setenv("LLM_CONTEXT_HTTP_LOG_MAX_BYTES", "2048")
     monkeypatch.setenv("LLM_CONTEXT_HTTP_LOG_BACKUP_COUNT", "4")
 
-    root_logger = mcp_server_http.logging.getLogger()
-    original_handlers = list(root_logger.handlers)
+    http_logger = mcp_server_http.logging.getLogger("mcp_server_http")
+    original_handlers = list(http_logger.handlers)
 
     try:
         mcp_server_http._configure_http_logging()
 
         rotating = [
             handler
-            for handler in root_logger.handlers
+            for handler in http_logger.handlers
             if isinstance(handler, RotatingFileHandler)
         ]
         assert len(rotating) == 1
@@ -129,11 +145,53 @@ def test_configure_http_logging_uses_rotating_file_handler(monkeypatch, tmp_path
         assert any(
             isinstance(handler, mcp_server_http.logging.StreamHandler)
             and not isinstance(handler, RotatingFileHandler)
-            for handler in root_logger.handlers
+            for handler in http_logger.handlers
         )
     finally:
-        for handler in list(root_logger.handlers):
+        for handler in list(http_logger.handlers):
             handler.close()
-        root_logger.handlers.clear()
+        http_logger.handlers.clear()
         for handler in original_handlers:
-            root_logger.addHandler(handler)
+            http_logger.addHandler(handler)
+
+
+def test_configure_http_logging_falls_back_on_invalid_env(monkeypatch, tmp_path):
+    log_path = tmp_path / "mcp-http.log"
+    monkeypatch.setenv("LLM_CONTEXT_HTTP_LOG_PATH", str(log_path))
+    monkeypatch.setenv("LLM_CONTEXT_HTTP_LOG_MAX_BYTES", "invalid")
+    monkeypatch.setenv("LLM_CONTEXT_HTTP_LOG_BACKUP_COUNT", "-1")
+
+    http_logger = mcp_server_http.logging.getLogger("mcp_server_http")
+    original_handlers = list(http_logger.handlers)
+
+    try:
+        mcp_server_http._configure_http_logging()
+        rotating = next(
+            handler
+            for handler in http_logger.handlers
+            if isinstance(handler, RotatingFileHandler)
+        )
+        assert rotating.maxBytes == mcp_server_http._DEFAULT_HTTP_LOG_MAX_BYTES
+        assert rotating.backupCount == mcp_server_http._DEFAULT_HTTP_LOG_BACKUP_COUNT
+    finally:
+        for handler in list(http_logger.handlers):
+            handler.close()
+        http_logger.handlers.clear()
+        for handler in original_handlers:
+            http_logger.addHandler(handler)
+
+
+@pytest.mark.asyncio
+async def test_read_json_body_rejects_oversized_payload():
+    payload = b'{"query_embedding": [' + b"1," * 400_000 + b"1]}"
+
+    class FakeContent:
+        async def iter_chunked(self, _size):
+            yield payload
+
+    class FakeRequest:
+        content_length = len(payload)
+        content = FakeContent()
+
+    with pytest.raises(ValueError, match="too large"):
+        await mcp_server_http._read_json_body(FakeRequest(), 1024)

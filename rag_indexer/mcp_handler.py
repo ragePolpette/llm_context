@@ -380,16 +380,19 @@ class MCPHandler:
     ) -> list[dict[str, Any]]:
         pool = get_pool(self._default_dsn)
         if pool is not None:
-            with pool.connection() as conn:
-                store = RagStore(conn, embedding_dim)
-                return store.query_symbols(
-                    name=name,
-                    repo_id=project_id,
-                    kind=kind,
-                    language=language,
-                    exact=exact,
-                    limit=limit,
-                )
+            try:
+                with pool.connection() as conn:
+                    store = RagStore(conn, embedding_dim)
+                    return store.query_symbols(
+                        name=name,
+                        repo_id=project_id,
+                        kind=kind,
+                        language=language,
+                        exact=exact,
+                        limit=limit,
+                    )
+            except Exception:
+                pass
 
         conn = get_connection(self._default_dsn)
         try:
