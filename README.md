@@ -164,6 +164,8 @@ set MCP_ALLOWED_ORIGINS=http://localhost:*,http://127.0.0.1:*,https://localhost:
 set LLM_CONTEXT_HTTP_LOG_PATH=logs/mcp_server_http.log
 set LLM_CONTEXT_HTTP_LOG_MAX_BYTES=1048576
 set LLM_CONTEXT_HTTP_LOG_BACKUP_COUNT=3
+set LLM_CONTEXT_MAX_REQUEST_BYTES=1048576
+set LLM_CONTEXT_MAX_QUERY_EMBEDDING_ITEMS=4096
 ```
 
 Valori chiave (gia' impostati per uso locale):
@@ -175,6 +177,8 @@ Valori chiave (gia' impostati per uso locale):
 - `LLM_CONTEXT_HTTP_LOG_PATH`: file log del server HTTP con rotazione
 - `LLM_CONTEXT_HTTP_LOG_MAX_BYTES`: dimensione massima di ogni file log prima della rotazione
 - `LLM_CONTEXT_HTTP_LOG_BACKUP_COUNT`: numero di file log storici mantenuti
+- `LLM_CONTEXT_MAX_REQUEST_BYTES`: limite massimo del body JSON accettato dagli endpoint HTTP prima del parse
+- `LLM_CONTEXT_MAX_QUERY_EMBEDDING_ITEMS`: limite massimo di elementi accettati in `query_embedding`
 
 ### Parametri principali (spiegazione)
 

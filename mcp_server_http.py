@@ -45,6 +45,9 @@ from rag_indexer.mcp_handler import MCPHandler, UUIDEncoder, tool_rag_context
 
 log = logging.getLogger("mcp_server_http")
 _IS_WINDOWS = os.name == "nt"
+_DEFAULT_HTTP_LOG_MAX_BYTES = 1_048_576
+_DEFAULT_HTTP_LOG_BACKUP_COUNT = 3
+_DEFAULT_MAX_REQUEST_BYTES = 1_048_576
 
 # ---------------------------------------------------------------------------
 # Single-instance guard (file lock)
@@ -213,7 +216,7 @@ def _ensure_port_free(host: str, port: int) -> None:
     if owner_pid is None:
         raise RuntimeError(
             f"Port {port} is busy but cannot identify the owning process. "
-            f"Check manually: Get-NetTCPConnection -LocalPort {port}"
+            f"Check manually: {_manual_port_check_hint(port)}"
         )
 
     # Safety: only kill if it's our own old server
@@ -227,7 +230,7 @@ def _ensure_port_free(host: str, port: int) -> None:
     if not _kill_old_server(owner_pid):
         raise RuntimeError(
             f"Could not kill old server PID {owner_pid}. "
-            f"Kill it manually: taskkill /F /PID {owner_pid}"
+            f"Kill it manually: {_manual_kill_hint(owner_pid)}"
         )
 
     # Wait a bit more for the port to be fully released
@@ -297,8 +300,41 @@ def _get_process_command(pid: int) -> str:
     return result.stdout
 
 
+def _manual_port_check_hint(port: int) -> str:
+    if _IS_WINDOWS:
+        return f"Get-NetTCPConnection -LocalPort {port}"
+    return f"lsof -i tcp:{port}"
+
+
+def _manual_kill_hint(pid: int) -> str:
+    if _IS_WINDOWS:
+        return f"taskkill /F /PID {pid}"
+    return f"kill -TERM {pid}"
+
+
+def _parse_non_negative_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        print(
+            f"[WARN] Invalid {name}={raw!r}; using default {default}",
+            file=sys.stderr,
+        )
+        return default
+    if value < 0:
+        print(
+            f"[WARN] Invalid {name}={raw!r}; using default {default}",
+            file=sys.stderr,
+        )
+        return default
+    return value
+
+
 def _configure_http_logging() -> None:
-    root_logger = logging.getLogger()
+    http_logger = logging.getLogger("mcp_server_http")
     formatter = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     )
@@ -312,8 +348,14 @@ def _configure_http_logging() -> None:
         log_path = (_ROOT_DIR / log_path).resolve()
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    max_bytes = int(os.getenv("LLM_CONTEXT_HTTP_LOG_MAX_BYTES", str(1_048_576)))
-    backup_count = int(os.getenv("LLM_CONTEXT_HTTP_LOG_BACKUP_COUNT", "3"))
+    max_bytes = _parse_non_negative_int_env(
+        "LLM_CONTEXT_HTTP_LOG_MAX_BYTES",
+        _DEFAULT_HTTP_LOG_MAX_BYTES,
+    )
+    backup_count = _parse_non_negative_int_env(
+        "LLM_CONTEXT_HTTP_LOG_BACKUP_COUNT",
+        _DEFAULT_HTTP_LOG_BACKUP_COUNT,
+    )
 
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(formatter)
@@ -326,10 +368,13 @@ def _configure_http_logging() -> None:
     )
     file_handler.setFormatter(formatter)
 
-    root_logger.handlers.clear()
-    root_logger.setLevel(logging.INFO)
-    root_logger.addHandler(stream_handler)
-    root_logger.addHandler(file_handler)
+    for handler in list(http_logger.handlers):
+        handler.close()
+        http_logger.removeHandler(handler)
+    http_logger.propagate = False
+    http_logger.setLevel(logging.INFO)
+    http_logger.addHandler(stream_handler)
+    http_logger.addHandler(file_handler)
 
 
 # ============================================================================
@@ -458,6 +503,8 @@ def _validate_jsonrpc_message(body: dict[str, Any]) -> None:
             raise ValueError("tools/call requires a non-empty string 'params.name'")
         if not isinstance(arguments, dict):
             raise ValueError("tools/call requires 'params.arguments' to be an object")
+        if name == "rag_context":
+            _validate_raw_rag_context_arguments(arguments)
 
 
 def _wrap_raw_rpc_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -515,6 +562,30 @@ def _validate_argument_value(name: str, value: Any, schema: dict[str, Any]) -> N
         return
 
 
+async def _read_json_body(request: web.Request, max_bytes: int) -> Any:
+    content_length = request.content_length
+    if content_length is not None and content_length > max_bytes:
+        raise ValueError(
+            f"Request body too large ({content_length} > {max_bytes} bytes)"
+        )
+
+    body = bytearray()
+    async for chunk in request.content.iter_chunked(65_536):
+        body.extend(chunk)
+        if len(body) > max_bytes:
+            raise ValueError(
+                f"Request body too large ({len(body)} > {max_bytes} bytes)"
+            )
+
+    if not body:
+        raise ValueError("Empty request body")
+
+    try:
+        return json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Invalid JSON") from exc
+
+
 async def run_http_server(
     handler: MCPHandler,
     host: str = "127.0.0.1",
@@ -540,6 +611,10 @@ async def run_http_server(
             "https://localhost:*",
             "https://127.0.0.1:*",
         ]
+    max_request_bytes = _parse_non_negative_int_env(
+        "LLM_CONTEXT_MAX_REQUEST_BYTES",
+        _DEFAULT_MAX_REQUEST_BYTES,
+    )
 
     # Store active SSE connections
     sessions: dict[str, asyncio.Queue] = {}
@@ -611,8 +686,8 @@ async def run_http_server(
             return web.json_response({"error": "Invalid session"}, status=400)
 
         try:
-            body = await request.json()
-        except Exception:
+            body = await _read_json_body(request, max_request_bytes)
+        except ValueError:
             return web.json_response({"error": "Invalid JSON"}, status=400)
 
         # Process message
@@ -630,12 +705,13 @@ async def run_http_server(
     async def handle_rpc(request: web.Request) -> web.Response:
         """Handle synchronous JSON-RPC messages (no SSE)."""
         try:
-            body = await request.json()
+            body = await _read_json_body(request, max_request_bytes)
             body = _coerce_rpc_message(body)
             print(f"[RPC] Received: {json.dumps(body)}")
-        except Exception as e:
+        except ValueError as e:
             print(f"[RPC] JSON parse error: {e}")
-            return web.json_response({"error": "Invalid JSON"}, status=400)
+            status = 413 if "too large" in str(e).lower() else 400
+            return web.json_response({"error": str(e)}, status=status)
 
         # Process message synchronously
         response = handler.handle_message(body)
@@ -656,8 +732,17 @@ async def run_http_server(
     async def handle_streamable(request: web.Request) -> web.Response:
         """Handle streamable HTTP JSON-RPC requests (POST)."""
         try:
-            body = await request.json()
-        except Exception:
+            body = await _read_json_body(request, max_request_bytes)
+        except ValueError as exc:
+            if "too large" in str(exc).lower():
+                return web.json_response(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": -32000, "message": str(exc)},
+                    },
+                    status=413,
+                )
             return web.json_response(
                 {
                     "jsonrpc": "2.0",
@@ -706,8 +791,11 @@ async def run_http_server(
     except OSError as exc:
         log.error(
             "Failed to bind %s:%d — %s. "
-            "Check with: Get-NetTCPConnection -LocalPort %d",
-            host, port, exc, port,
+            "Check with: %s",
+            host,
+            port,
+            exc,
+            _manual_port_check_hint(port),
         )
         await runner.cleanup()
         raise
