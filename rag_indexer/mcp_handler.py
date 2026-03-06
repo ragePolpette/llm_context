@@ -74,6 +74,9 @@ class MCPHandler:
         self._default_embedding_dim = int(
             os.getenv("LLM_CONTEXT_EMBEDDING_DIM", str(self._config.embedding_dim))
         )
+        self._max_query_embedding_items = int(
+            os.getenv("LLM_CONTEXT_MAX_QUERY_EMBEDDING_ITEMS", "4096")
+        )
         self._embedder_cache: dict[str, Embedder] = {}
         self._ready = threading.Event()
 
@@ -266,6 +269,7 @@ class MCPHandler:
         doc_type = args.get("doc_type") or self._config.default_doc_type
         language = args.get("language")
         embedding_dim = int(args.get("embedding_dim", self._default_embedding_dim))
+        self._validate_query_embedding(query_embedding, embedding_dim)
         embedder = self._get_embedder(args, embedding_dim)
 
         resolved_prefix = resolve_path_prefix(
@@ -366,6 +370,30 @@ class MCPHandler:
             "count": len(results),
             "results": results,
         }
+
+    def _validate_query_embedding(
+        self,
+        query_embedding: Any,
+        embedding_dim: int,
+    ) -> None:
+        if query_embedding is None:
+            return
+        if not isinstance(query_embedding, list):
+            raise ValueError("query_embedding must be an array of numeric values")
+
+        item_count = len(query_embedding)
+        if item_count > self._max_query_embedding_items:
+            raise ValueError(
+                "query_embedding exceeds maximum allowed length "
+                f"({item_count} > {self._max_query_embedding_items})"
+            )
+        if item_count != embedding_dim:
+            raise ValueError(
+                f"query_embedding length mismatch: {item_count} != {embedding_dim}"
+            )
+        for item in query_embedding:
+            if isinstance(item, bool) or not isinstance(item, (int, float)):
+                raise ValueError("query_embedding must contain only numeric values")
 
     def _get_embedder(self, args: dict[str, Any], embedding_dim: int) -> Embedder:
         """Get or create embedder with caching."""

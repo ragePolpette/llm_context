@@ -8,6 +8,7 @@ from rag_indexer.mcp_handler import MCPHandler, tool_rag_context, tool_symbol_se
 def default_env(monkeypatch):
     monkeypatch.setenv("LLM_CONTEXT_DSN", "postgresql://ctx_user:ctx_pass@localhost:5432/postgres")
     monkeypatch.setenv("LLM_CONTEXT_EMBEDDER", "local-hash")
+    monkeypatch.setenv("LLM_CONTEXT_MAX_QUERY_EMBEDDING_ITEMS", "16")
 
 
 @pytest.fixture
@@ -86,3 +87,28 @@ def test_symbol_search_uses_configured_default_dsn(monkeypatch, no_warmup):
     assert captured["closed"] is True
     assert payload["count"] == 1
 
+
+def test_rag_context_rejects_oversized_query_embedding(monkeypatch, no_warmup):
+    handler = MCPHandler()
+    monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
+
+    with pytest.raises(ValueError, match="exceeds maximum allowed length"):
+        handler._run_rag_context(
+            {
+                "query_embedding": [0.1] * 17,
+                "embedding_dim": 17,
+            }
+        )
+
+
+def test_rag_context_rejects_embedding_length_mismatch(monkeypatch, no_warmup):
+    handler = MCPHandler()
+    monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
+
+    with pytest.raises(ValueError, match="length mismatch"):
+        handler._run_rag_context(
+            {
+                "query_embedding": [0.1] * 8,
+                "embedding_dim": 4,
+            }
+        )
