@@ -40,7 +40,7 @@ _ROOT_DIR = Path(__file__).resolve().parent
 if str(_ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(_ROOT_DIR))
 
-from rag_indexer.mcp_handler import MCPHandler, UUIDEncoder
+from rag_indexer.mcp_handler import MCPHandler, UUIDEncoder, tool_rag_context
 
 log = logging.getLogger("mcp_server_http")
 
@@ -346,6 +346,88 @@ def _jsonrpc_transport_error(message: str) -> dict[str, Any]:
     }
 
 
+def _coerce_rpc_message(body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise ValueError("/rpc expects a JSON object body")
+    if "jsonrpc" not in body and "method" not in body:
+        return _wrap_raw_rpc_arguments(body)
+    _validate_jsonrpc_message(body)
+    return body
+
+
+def _validate_jsonrpc_message(body: dict[str, Any]) -> None:
+    method = body.get("method")
+    if not isinstance(method, str) or not method.strip():
+        raise ValueError("JSON-RPC request must include a non-empty string 'method'")
+
+    params = body.get("params")
+    if params is not None and not isinstance(params, dict):
+        raise ValueError("JSON-RPC 'params' must be an object when provided")
+
+    if method == "tools/call" and isinstance(params, dict):
+        name = params.get("name")
+        arguments = params.get("arguments", {})
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("tools/call requires a non-empty string 'params.name'")
+        if not isinstance(arguments, dict):
+            raise ValueError("tools/call requires 'params.arguments' to be an object")
+
+
+def _wrap_raw_rpc_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    validated = _validate_raw_rag_context_arguments(arguments)
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "rag_context",
+            "arguments": validated,
+        },
+    }
+
+
+def _validate_raw_rag_context_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    schema_properties = tool_rag_context()["inputSchema"]["properties"]
+    unknown_keys = sorted(set(arguments) - set(schema_properties))
+    if unknown_keys:
+        raise ValueError(
+            "Unsupported /rpc rag_context arguments: " + ", ".join(unknown_keys)
+        )
+    if "query_text" not in arguments and "query_embedding" not in arguments:
+        raise ValueError("/rpc rag_context requires 'query_text' or 'query_embedding'")
+
+    for key, value in arguments.items():
+        _validate_argument_value(key, value, schema_properties[key])
+    return dict(arguments)
+
+
+def _validate_argument_value(name: str, value: Any, schema: dict[str, Any]) -> None:
+    schema_type = schema.get("type")
+    if schema_type == "string":
+        if not isinstance(value, str):
+            raise ValueError(f"/rpc argument '{name}' must be a string")
+        return
+    if schema_type == "integer":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"/rpc argument '{name}' must be an integer")
+        return
+    if schema_type == "boolean":
+        if not isinstance(value, bool):
+            raise ValueError(f"/rpc argument '{name}' must be a boolean")
+        return
+    if schema_type == "array":
+        if not isinstance(value, list):
+            raise ValueError(f"/rpc argument '{name}' must be an array")
+        item_schema = schema.get("items", {})
+        if item_schema.get("type") == "number":
+            for item in value:
+                if isinstance(item, bool) or not isinstance(item, (int, float)):
+                    raise ValueError(
+                        f"/rpc argument '{name}' must contain only numeric values"
+                    )
+        return
+
+
 async def run_http_server(
     handler: MCPHandler,
     host: str = "127.0.0.1",
@@ -462,24 +544,11 @@ async def run_http_server(
         """Handle synchronous JSON-RPC messages (no SSE)."""
         try:
             body = await request.json()
+            body = _coerce_rpc_message(body)
             print(f"[RPC] Received: {json.dumps(body)}")
         except Exception as e:
             print(f"[RPC] JSON parse error: {e}")
             return web.json_response({"error": "Invalid JSON"}, status=400)
-
-        # If this is NOT a JSON-RPC message, wrap it as a rag_context call
-        if "jsonrpc" not in body and "method" not in body:
-            print(f"[RPC] Wrapping raw arguments into JSON-RPC tools/call")
-            body = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "tools/call",
-                "params": {
-                    "name": "rag_context",
-                    "arguments": body
-                }
-            }
-            print(f"[RPC] Wrapped message: {json.dumps(body)}")
 
         # Process message synchronously
         response = handler.handle_message(body)
