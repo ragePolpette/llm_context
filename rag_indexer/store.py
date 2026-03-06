@@ -288,8 +288,8 @@ class RagStore:
         ]
 
         if path_prefix:
-            path_placeholder = add_param(f"{path_prefix}%")
-            conditions.append(f"d.path_norm LIKE {path_placeholder}")
+            path_placeholder = add_param(f"{_escape_like_value(path_prefix)}%")
+            conditions.append(f"d.path_norm LIKE {path_placeholder} ESCAPE '\\'")
         if doc_type:
             doc_placeholder = add_param(doc_type)
             conditions.append(f"d.doc_type = {doc_placeholder}")
@@ -364,8 +364,8 @@ class RagStore:
         ]
 
         if path_prefix:
-            path_placeholder = add_param(f"{path_prefix}%")
-            conditions.append(f"d.path_norm LIKE {path_placeholder}")
+            path_placeholder = add_param(f"{_escape_like_value(path_prefix)}%")
+            conditions.append(f"d.path_norm LIKE {path_placeholder} ESCAPE '\\'")
         if doc_type:
             doc_placeholder = add_param(doc_type)
             conditions.append(f"d.doc_type = {doc_placeholder}")
@@ -462,7 +462,10 @@ class RagStore:
         if exact:
             name_cond = f"lower(s.name) = lower({add_param(name)})"
         else:
-            name_cond = f"lower(s.name) LIKE lower({add_param(name + '%')})"
+            name_cond = (
+                f"lower(s.name) LIKE lower({add_param(_escape_like_value(name) + '%')}) "
+                "ESCAPE '\\'"
+            )
 
         conditions = [name_cond]
         if repo_id:
@@ -508,3 +511,7 @@ def _validate_embedding(embedding: list[float], dim: int) -> None:
     for value in embedding:
         if not isinstance(value, (int, float)):
             raise TypeError("Embedding values must be numeric")
+
+
+def _escape_like_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
