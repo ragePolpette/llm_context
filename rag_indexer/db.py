@@ -10,6 +10,7 @@ import threading
 _psycopg = importlib.import_module("psycopg")
 sql = _psycopg.sql
 register_vector = importlib.import_module("pgvector.psycopg").register_vector
+_PARAM_PATTERN = re.compile(r"@Valore(\d+)")
 
 # Connection pooling
 _pools: dict[str, Any] = {}
@@ -227,7 +228,8 @@ def _register_vector_safe(conn: Any) -> None:
 
 
 def execute_params(cursor: Any, sql_text: str, params: list[Any]) -> None:
-    query, values = _normalize_params(sql_text, params)
+    query, order = _normalize_params(sql_text)
+    values = _reorder_params(order, params)
     cursor.execute(sql.SQL(cast(Any, query)), values)
 
 
@@ -236,13 +238,48 @@ def execute_many_params(
     sql_text: str,
     params_list: Iterable[list[Any]],
 ) -> None:
-    query, _ = _normalize_params(sql_text, [])
-    cursor.executemany(sql.SQL(cast(Any, query)), params_list)
+    query, order = _normalize_params(sql_text)
+    reordered_params = (_reorder_params(order, params) for params in params_list)
+    cursor.executemany(sql.SQL(cast(Any, query)), reordered_params)
 
 
-def _normalize_params(sql_text: str, params: list[Any]) -> tuple[str, list[Any]]:
-    query = re.sub(r"@Valore\d+", "%s", sql_text)
-    return query, params
+def _normalize_params(sql_text: str) -> tuple[str, list[int]]:
+    indices: list[int] = []
+
+    def _replace(match: re.Match[str]) -> str:
+        indices.append(int(match.group(1)))
+        return "%s"
+
+    query = _PARAM_PATTERN.sub(_replace, sql_text)
+    _validate_placeholder_indices(indices, sql_text)
+    return query, indices
+
+
+def _validate_placeholder_indices(indices: list[int], sql_text: str) -> None:
+    if not indices:
+        return
+    unique_indices = sorted(set(indices))
+    expected = list(range(unique_indices[-1] + 1))
+    if unique_indices != expected:
+        raise ValueError(
+            "SQL placeholders must be contiguous and start at @Valore0: "
+            f"{sql_text}"
+        )
+
+
+def _reorder_params(order: list[int], params: list[Any]) -> list[Any]:
+    if not order:
+        if params:
+            raise ValueError("SQL query does not define placeholders but parameters were provided")
+        return []
+
+    expected_param_count = max(order) + 1
+    if len(params) != expected_param_count:
+        raise ValueError(
+            "SQL parameter count mismatch: "
+            f"expected {expected_param_count}, got {len(params)}"
+        )
+    return [params[index] for index in order]
 
 
 def _validate_positive_int(value: int, name: str) -> int:
