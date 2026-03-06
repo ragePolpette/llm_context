@@ -16,7 +16,7 @@ from typing import Any, Optional
 
 from rag_indexer.agent_context import build_context
 from rag_indexer.config import load_config
-from rag_indexer.db import get_connection
+from rag_indexer.db import get_connection, get_pool
 from rag_indexer.embedder import (
     DummyEmbedder,
     Embedder,
@@ -351,10 +351,50 @@ class MCPHandler:
         limit = int(args.get("limit", 20))
         embedding_dim = int(args.get("embedding_dim", self._default_embedding_dim))
 
+        results = self._query_symbols(
+            name=name,
+            project_id=project_id,
+            kind=kind,
+            language=language,
+            exact=exact,
+            limit=limit,
+            embedding_dim=embedding_dim,
+        )
+
+        return {
+            "query": {"name": name, "kind": kind, "language": language, "exact": exact},
+            "count": len(results),
+            "results": results,
+        }
+
+    def _query_symbols(
+        self,
+        *,
+        name: str,
+        project_id: str,
+        kind: Optional[str],
+        language: Optional[str],
+        exact: bool,
+        limit: int,
+        embedding_dim: int,
+    ) -> list[dict[str, Any]]:
+        pool = get_pool(self._default_dsn)
+        if pool is not None:
+            with pool.connection() as conn:
+                store = RagStore(conn, embedding_dim)
+                return store.query_symbols(
+                    name=name,
+                    repo_id=project_id,
+                    kind=kind,
+                    language=language,
+                    exact=exact,
+                    limit=limit,
+                )
+
         conn = get_connection(self._default_dsn)
         try:
             store = RagStore(conn, embedding_dim)
-            results = store.query_symbols(
+            return store.query_symbols(
                 name=name,
                 repo_id=project_id,
                 kind=kind,
@@ -364,12 +404,6 @@ class MCPHandler:
             )
         finally:
             conn.close()
-
-        return {
-            "query": {"name": name, "kind": kind, "language": language, "exact": exact},
-            "count": len(results),
-            "results": results,
-        }
 
     def _validate_query_embedding(
         self,
