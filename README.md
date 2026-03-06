@@ -232,14 +232,14 @@ Attenzione: questo cancella tutto l'indice esistente.
 
 ```bash
 docker exec -it pgvector psql -U postgres -d postgres -c "DROP TABLE IF EXISTS chunk_embeddings; DROP TABLE IF EXISTS chunks; DROP TABLE IF EXISTS documents;"
-python llm_context/cli.py init-db-v2 --dsn "postgresql://postgres:postgres@localhost:5432/postgres" --embedding-dim 384
+python llm_context/cli.py init-db-v2 --dsn "postgresql://<user>:<password>@localhost:5432/postgres" --embedding-dim 384
 ```
 
 ## Ingest v2 incrementale (locale, senza invio dati)
 
 ```bash
 python llm_context/cli.py --verbose ingest --incremental \
-  --dsn "postgresql://postgres:postgres@localhost:5432/postgres" \
+  --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --root ./ \
   --embedder local-st
@@ -260,7 +260,7 @@ Se vuoi cambiare modello:
 
 ```bash
 python llm_context/cli.py query \
-  --dsn "postgresql://postgres:postgres@localhost:5432/postgres" \
+  --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --text "come funziona X?" \
   --top-k 8 \
@@ -272,7 +272,7 @@ Oppure usa direttamente un file/dir per filtrare:
 
 ```bash
 python llm_context/cli.py query \
-  --dsn "postgresql://postgres:postgres@localhost:5432/postgres" \
+  --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --text "spiegami Attivita" \
   --top-k 8 \
@@ -286,7 +286,7 @@ Comando che restituisce solo il contesto da incollare nel prompt:
 
 ```bash
 python llm_context/cli.py context \
-  --dsn "postgresql://postgres:postgres@localhost:5432/postgres" \
+  --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --text "come funziona bpofh?" \
   --top-k 8 \
@@ -305,7 +305,7 @@ Oppure usa direttamente un file/dir per filtrare:
 
 ```bash
 python llm_context/cli.py context \
-  --dsn "postgresql://postgres:postgres@localhost:5432/postgres" \
+  --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --text "come funziona?" \
   --top-k 8 \
@@ -345,7 +345,7 @@ Esempio minimo (Python):
 from rag_indexer.agent_context import build_context
 from rag_indexer.embedder import LocalSentenceTransformerEmbedder
 
-DSN = "postgresql://postgres:postgres@localhost:5432/postgres"
+DSN = "postgresql://<user>:<password>@localhost:5432/postgres"
 PROJECT_ID = "myproj"
 
 embedder = LocalSentenceTransformerEmbedder(
@@ -400,14 +400,14 @@ pip install -e llm_context
 Init DB v2:
 
 ```bash
-python llm_context/cli.py init-db-v2 --dsn "postgresql://postgres:postgres@localhost:5432/postgres" --embedding-dim 384
+python llm_context/cli.py init-db-v2 --dsn "postgresql://<user>:<password>@localhost:5432/postgres" --embedding-dim 384
 ```
 
 Ingest v2 incrementale:
 
 ```bash
 python llm_context/cli.py --verbose ingest --incremental \
-  --dsn "postgresql://postgres:postgres@localhost:5432/postgres" \
+  --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --root ./ \
   --embedder local-st
@@ -417,7 +417,7 @@ Context (per agenti, v2):
 
 ```bash
 python llm_context/cli.py context \
-  --dsn "postgresql://postgres:postgres@localhost:5432/postgres" \
+  --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --text "stiamo lavorando su bpofh" \
   --top-k 8 \
@@ -428,9 +428,10 @@ Query normale (v2):
 
 ```bash
 python llm_context/cli.py query \
-  --dsn "postgresql://postgres:postgres@localhost:5432/postgres" \
+  --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --text "come funziona bpofh?" \
   --top-k 8 \
   --embedder local-st
 ```
+

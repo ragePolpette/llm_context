@@ -17,7 +17,7 @@ Usa l'helper `rag_indexer/agent_context.py` che incapsula retrieval + formattazi
 from rag_indexer.agent_context import build_context
 from rag_indexer.embedder import LocalSentenceTransformerEmbedder
 
-DSN = "postgresql://postgres:postgres@localhost:5432/postgres"
+DSN = "postgresql://<user>:<password>@localhost:5432/postgres"
 PROJECT_ID = "myproj"
 embedder = LocalSentenceTransformerEmbedder(
     model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
@@ -53,7 +53,7 @@ direttamente il testo da inserire nel prompt:
 
 ```bash
 python llm_context/cli.py context \
-  --dsn "postgresql://postgres:postgres@localhost:5432/postgres" \
+  --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --text "come funziona bpofh?" \
   --top-k 8 \
@@ -69,7 +69,7 @@ Oppure usa direttamente un file/dir:
 
 ```bash
 python llm_context/cli.py context \
-  --dsn "postgresql://postgres:postgres@localhost:5432/postgres" \
+  --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --text "spiegami il flusso" \
   --top-k 8 \
@@ -91,7 +91,7 @@ Se vuoi gestire tu l'embedding e la query:
 import psycopg
 from rag_indexer.embedder import LocalSentenceTransformerEmbedder
 
-DSN = "postgresql://postgres:postgres@localhost:5432/postgres"
+DSN = "postgresql://<user>:<password>@localhost:5432/postgres"
 PROJECT_ID = "myproj"
 embedder = LocalSentenceTransformerEmbedder(
     model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
@@ -131,3 +131,4 @@ for row in rows:
 
 Con `local-st` gli embedding sono calcolati in locale.
 Non c'e' invio dati all'esterno (a parte il download iniziale del modello).
+
