@@ -1,0 +1,17 @@
+[
+  {
+    "query": "esporta presenze teamsystem",
+    "expected_paths": ["librerie\\BpoFH\\PersonaleExport.cs"],
+    "top_k": 8
+  },
+  {
+    "query": "menu permessi",
+    "expected_paths": ["pubblico\\api\\Controllers\\menu.cs"],
+    "top_k": 8
+  },
+  {
+    "query": "registrazione contabile fiscobot",
+    "expected_paths": ["librerie\\Fiscobot\\RegistrazioneContabile.cs"],
+    "top_k": 8
+  }
+]
