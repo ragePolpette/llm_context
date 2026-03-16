@@ -8,6 +8,101 @@ L'obiettivo e' indicizzare solo un sottoinsieme di cartelle del progetto, usare 
 e mantenere un indice v2 con metadata ricchi e aggiornamenti incrementali.
 Questo MCP serve solo per retrieval di contesto tecnico (codice/documenti): non e' un sistema di memoria operativa persistente.
 
+## Multi-project mode
+
+`llm-context` puo' ora lavorare in due modalita':
+
+- `single-project`:
+  - comportamento legacy
+  - puo' usare `default_project_id` come fallback sicuro
+- `multi-project`:
+  - richiede `project_id` esplicito per `rag_context`, `rag_search`, `symbol_search`
+  - espone discovery via MCP con `list_projects` e `get_project_info`
+
+I flag principali sono in `config.yaml` / `config.example.yaml`:
+
+- `multi_project_enabled`
+- `default_project_id`
+- `projects_registry_path`
+- `projects_state_path`
+- `ingest_enabled`
+- `write_enabled`
+
+## Project registry
+
+Il registro progetti e' file-based e inizialmente semplice. Un esempio e' in
+[projects.example.yaml](/C:/Users/Gianmarco/Urgewalt/Yetzirah/llm_context/projects.example.yaml).
+
+Ogni progetto puo' dichiarare almeno:
+
+- `project_id`
+- `display_name`
+- `root_path`
+- `include_profile`
+- `retrieval_profile`
+- `include_dirs`
+- `exclude_globs`
+- `ingest_enabled`
+- `write_enabled`
+
+Lo stato runtime di ingest viene salvato separatamente in `projects.state.json`, per esempio:
+
+- `last_ingest_status`
+- `last_ingest_started_at`
+- `last_ingest_finished_at`
+- `last_successful_ingest_at`
+- `last_ingest_duration_sec`
+- `index_version`
+- `index_fingerprint`
+
+## Read-plane vs write-plane
+
+Il piano MCP standard resta di sola retrieval:
+
+- `rag_context`
+- `rag_search`
+- `symbol_search`
+- `list_projects`
+- `get_project_info`
+- `context_info`
+
+L'ingest non e' esposto come tool MCP standard.
+L'ingest resta una capability operativa separata, attivabile solo a startup/config level con:
+
+- `ingest_enabled=true`
+  oppure
+- `write_enabled=true`
+
+## Ingest CLI schedulabile
+
+La CLI e' il write-plane consigliato.
+
+Comandi nuovi/rilevanti:
+
+- `python cli.py --config config.yaml list-projects --json`
+- `python cli.py --config config.yaml ingest --dsn <dsn> --project-id <project_id>`
+- `python cli.py --config config.yaml ingest-enabled-projects --dsn <dsn>`
+
+Comportamento:
+
+- `ingest` valida il `project_id` contro il registry
+- se il progetto esiste nel registry, risolve `root_path` e profilo base dal registry
+- aggiorna `projects.state.json` con stato, durata e fingerprint indice
+- `ingest-enabled-projects` esegue batch solo sui progetti con `ingest_enabled=true`
+
+Questo modello e' pensato per essere schedulato esternamente senza esporre l'ingest come capability MCP always-on.
+
+## Health operativo
+
+L'endpoint `/health` espone ora anche stato operativo utile per la dashboard esterna:
+
+- `status`
+- `multi_project_enabled`
+- `ingest_enabled`
+- `write_enabled`
+- `project_count`
+- riepilogo per progetto con stato ingest e freshness base
+
 ## Spiegazione teorica (cosa abbiamo fatto e perche')
 
 ### Obiettivo del sistema
