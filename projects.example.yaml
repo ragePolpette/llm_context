@@ -1,0 +1,13 @@
+projects:
+  - project_id: myproj
+    display_name: My Project
+    root_path: .
+    include_profile: default
+    retrieval_profile: default
+    include_dirs:
+      - src
+      - docs
+    exclude_globs:
+      - "*.env"
+    ingest_enabled: true
+    write_enabled: false
