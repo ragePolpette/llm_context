@@ -1,4 +1,5 @@
 import pytest
+import yaml
 
 from rag_indexer import mcp_handler as mcp_handler_module
 from rag_indexer.mcp_handler import MCPHandler, tool_rag_context, tool_symbol_search
@@ -203,3 +204,105 @@ def test_rag_context_rejects_embedding_length_mismatch(monkeypatch, no_warmup):
                 "embedding_dim": 4,
             }
         )
+
+
+def _write_multi_project_config(tmp_path, *, multi_project_enabled=True, default_project_id="alpha"):
+    projects_path = tmp_path / "projects.yaml"
+    projects_path.write_text(
+        yaml.safe_dump(
+            {
+                "projects": [
+                    {
+                        "project_id": "alpha",
+                        "display_name": "Alpha",
+                        "root_path": "repos/alpha",
+                        "ingest_enabled": True,
+                    },
+                    {
+                        "project_id": "beta",
+                        "display_name": "Beta",
+                        "root_path": "repos/beta",
+                        "ingest_enabled": False,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "multi_project_enabled": multi_project_enabled,
+                "default_project_id": default_project_id,
+                "projects_registry_path": str(projects_path.name),
+                "projects_state_path": "projects.state.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def test_list_projects_returns_registered_projects(monkeypatch, no_warmup, tmp_path):
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+
+    payload = handler._run_list_projects()
+
+    assert payload["count"] == 2
+    assert payload["multi_project_enabled"] is True
+    assert [project["project_id"] for project in payload["projects"]] == ["alpha", "beta"]
+
+
+def test_get_project_info_returns_registry_entry(monkeypatch, no_warmup, tmp_path):
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+
+    payload = handler._run_get_project_info({"project_id": "alpha"})
+
+    assert payload["project_id"] == "alpha"
+    assert payload["display_name"] == "Alpha"
+    assert payload["ingest_enabled"] is True
+
+
+def test_multi_project_mode_requires_explicit_project_id(monkeypatch, no_warmup, tmp_path):
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
+
+    with pytest.raises(ValueError, match="requires explicit project_id"):
+        handler._run_rag_context({"query_text": "bpofh"})
+
+
+def test_single_project_mode_keeps_safe_default_fallback(monkeypatch, no_warmup, tmp_path):
+    captured = {}
+
+    def fake_build_context(**kwargs):
+        captured["project_id"] = kwargs["project_id"]
+        return "ctx", []
+
+    monkeypatch.setattr(mcp_handler_module, "build_context", fake_build_context)
+    handler = MCPHandler(
+        config_path=str(
+            _write_multi_project_config(
+                tmp_path,
+                multi_project_enabled=False,
+                default_project_id="alpha",
+            )
+        )
+    )
+    monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
+
+    payload = handler._run_rag_context({"query_text": "bpofh"})
+
+    assert captured["project_id"] == "alpha"
+    assert payload["meta"]["project_id"] == "alpha"
+
+
+def test_context_operational_status_exposes_project_summary(monkeypatch, no_warmup, tmp_path):
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+
+    payload = handler.get_operational_status(ready=True)
+
+    assert payload["status"] == "ready"
+    assert payload["multi_project_enabled"] is True
+    assert payload["project_count"] == 2
+    assert payload["projects"][0]["project_id"] == "alpha"
