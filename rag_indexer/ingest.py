@@ -122,6 +122,7 @@ def ingest_project_v2(
 
         doc_id = store.upsert_document(doc_record)
         store.delete_chunks(doc_id)
+        symbol_count = 0
 
         if symbol_search_enabled and source_type == "code":
             try:
@@ -144,6 +145,7 @@ def ingest_project_v2(
                 ]
                 if symbol_records:
                     store.insert_symbols(symbol_records)
+                symbol_count = len(symbol_records)
             except Exception as _sym_exc:
                 logger.warning("Symbol extraction failed for %s: %s", path, _sym_exc)
 
@@ -207,6 +209,15 @@ def ingest_project_v2(
         inserted = store.insert_chunks_and_embeddings(chunk_records, embedding_records)
         stats.chunks_inserted += inserted
         stats.files_indexed += 1
+        logger.info(
+            "Ingest write path=%s repo=%s source_type=%s chunks_created=%s chunks_inserted=%s symbols=%s",
+            relative_path,
+            repo_id,
+            source_type,
+            len(chunk_records),
+            inserted,
+            symbol_count,
+        )
         logger.debug("Indexed file %s: %s chunks", path, len(chunk_records))
 
     if incremental:
