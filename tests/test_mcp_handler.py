@@ -295,3 +295,14 @@ def test_single_project_mode_keeps_safe_default_fallback(monkeypatch, no_warmup,
 
     assert captured["project_id"] == "alpha"
     assert payload["meta"]["project_id"] == "alpha"
+
+
+def test_context_operational_status_exposes_project_summary(monkeypatch, no_warmup, tmp_path):
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+
+    payload = handler.get_operational_status(ready=True)
+
+    assert payload["status"] == "ready"
+    assert payload["multi_project_enabled"] is True
+    assert payload["project_count"] == 2
+    assert payload["projects"][0]["project_id"] == "alpha"

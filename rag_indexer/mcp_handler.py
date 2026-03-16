@@ -469,6 +469,30 @@ class MCPHandler:
         project = self._project_registry.require_project(project_id)
         return project.to_public_dict()
 
+    def get_operational_status(self, *, ready: bool) -> dict[str, Any]:
+        projects = []
+        for project in self._project_registry.list_projects():
+            projects.append(
+                {
+                    "project_id": project.project_id,
+                    "display_name": project.display_name,
+                    "ingest_enabled": project.ingest_enabled,
+                    "write_enabled": project.write_enabled,
+                    "last_ingest_status": project.last_ingest_status,
+                    "last_successful_ingest_at": project.last_successful_ingest_at,
+                    "index_version": project.index_version,
+                    "index_fingerprint": project.index_fingerprint,
+                }
+            )
+        return {
+            "status": "ready" if ready else "loading",
+            "multi_project_enabled": self._config.multi_project_enabled,
+            "ingest_enabled": self._config.ingest_enabled,
+            "write_enabled": self._config.write_enabled,
+            "project_count": len(projects),
+            "projects": projects,
+        }
+
     def _resolve_project_id(self, args: dict[str, Any], *, tool_name: str) -> str:
         explicit_project_id = str(args.get("project_id") or "").strip()
         if self._config.multi_project_enabled:
