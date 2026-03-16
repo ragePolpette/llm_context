@@ -11,6 +11,7 @@ import os
 import sys
 import threading
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -253,7 +254,22 @@ class MCPHandler:
             "error": {"code": -32601, "message": f"Method not found: {method}"},
         }
 
-    def _run_rag_context(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _preview_value(self, value: Any, *, limit: int = 240) -> Any:
+        if isinstance(value, str):
+            compact = " ".join(value.split())
+            return compact[:limit]
+        return value
+
+    def _log_activity(self, event: str, payload: dict[str, Any]) -> None:
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "server": "llm-context-mcp",
+            "event": event,
+            **payload,
+        }
+        sys.stderr.write(f"[MCP_ACTIVITY] {json.dumps(record, ensure_ascii=True, cls=UUIDEncoder)}\n")
+
+    def _run_rag_context(self, args: dict[str, Any], *, tool_name: str = "rag_context") -> dict[str, Any]:
         """Execute rag_context tool."""
         query_text = args.get("query_text")
         query_embedding = args.get("query_embedding")
@@ -278,6 +294,20 @@ class MCPHandler:
             query_text=query_text,
             auto_scope=auto_scope,
             scope_map=self._config.scope_map,
+        )
+        self._log_activity(
+            "query_in",
+            {
+                "tool": tool_name,
+                "project_id": project_id,
+                "query_text": self._preview_value(query_text),
+                "query_embedding_provided": query_embedding is not None,
+                "top_k": top_k,
+                "path_prefix": resolved_prefix,
+                "file": file_path,
+                "doc_type": doc_type,
+                "language": language,
+            },
         )
 
         context, results = build_context(
@@ -305,7 +335,7 @@ class MCPHandler:
             results=results,
             max_chars=max_chars,
         )
-        return {
+        payload = {
             "context": context,
             "context_sheet": context_sheet,
             "results": results,
@@ -316,10 +346,21 @@ class MCPHandler:
                 "max_chars": max_chars,
             },
         }
+        self._log_activity(
+            "query_out",
+            {
+                "tool": tool_name,
+                "project_id": project_id,
+                "path_prefix": resolved_prefix,
+                "result_count": len(results),
+                "has_results": bool(results),
+            },
+        )
+        return payload
 
     def _run_rag_search(self, args: dict[str, Any]) -> dict[str, Any]:
         """Execute rag_search tool (same as rag_context but without formatted context)."""
-        payload = self._run_rag_context(args)
+        payload = self._run_rag_context(args, tool_name="rag_search")
         payload.pop("context", None)
         return payload
 
@@ -350,6 +391,18 @@ class MCPHandler:
         exact = parse_bool(str(args.get("exact", False)))
         limit = int(args.get("limit", 20))
         embedding_dim = int(args.get("embedding_dim", self._default_embedding_dim))
+        self._log_activity(
+            "query_in",
+            {
+                "tool": "symbol_search",
+                "project_id": project_id,
+                "name": self._preview_value(name),
+                "kind": kind,
+                "language": language,
+                "exact": exact,
+                "limit": limit,
+            },
+        )
 
         results = self._query_symbols(
             name=name,
@@ -360,12 +413,22 @@ class MCPHandler:
             limit=limit,
             embedding_dim=embedding_dim,
         )
-
-        return {
+        payload = {
             "query": {"name": name, "kind": kind, "language": language, "exact": exact},
             "count": len(results),
             "results": results,
         }
+        self._log_activity(
+            "query_out",
+            {
+                "tool": "symbol_search",
+                "project_id": project_id,
+                "name": self._preview_value(name),
+                "result_count": len(results),
+                "has_results": bool(results),
+            },
+        )
+        return payload
 
     def _query_symbols(
         self,
