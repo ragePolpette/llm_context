@@ -25,6 +25,7 @@ from rag_indexer.embedder import (
     LocalSentenceTransformerEmbedder,
 )
 from rag_indexer.path_utils import parse_bool, resolve_path_prefix
+from rag_indexer.project_registry import load_project_registry
 from rag_indexer.store import RagStore
 
 
@@ -58,9 +59,15 @@ class MCPHandler:
         if config_path is None:
             config_path = str(self._project_root / "config.yaml")
         self._config = load_config(config_path)
+        self._project_registry = load_project_registry(
+            self._config.projects_registry_path,
+            self._config.projects_state_path,
+        )
         self._embedder_lock = threading.Lock()
         self._default_dsn = self._require_default_dsn()
-        self._default_project_id = os.getenv("LLM_CONTEXT_PROJECT_ID", "myproj")
+        self._default_project_id = str(
+            os.getenv("LLM_CONTEXT_PROJECT_ID", self._config.default_project_id)
+        ).strip()
         self._default_embedder = os.getenv("LLM_CONTEXT_EMBEDDER", "local-st")
         self._allow_embedder_fallback = parse_bool(
             os.getenv("LLM_CONTEXT_ALLOW_EMBEDDER_FALLBACK", "true")
@@ -180,6 +187,8 @@ class MCPHandler:
                         tool_rag_search(),
                         tool_context_info(),
                         tool_symbol_search(),
+                        tool_list_projects(),
+                        tool_get_project_info(),
                     ]
                 },
             }
@@ -219,6 +228,10 @@ class MCPHandler:
                     payload = self._run_context_info()
                 elif name == "symbol_search":
                     payload = self._run_symbol_search(args)
+                elif name == "list_projects":
+                    payload = self._run_list_projects()
+                elif name == "get_project_info":
+                    payload = self._run_get_project_info(args)
                 else:
                     raise ValueError(f"Unknown tool: {name}")
             except Exception as exc:
@@ -275,7 +288,7 @@ class MCPHandler:
         query_embedding = args.get("query_embedding")
         if query_text is None and query_embedding is None:
             raise ValueError("query_text or query_embedding is required")
-        project_id = args.get("project_id") or self._default_project_id
+        project_id = self._resolve_project_id(args, tool_name=tool_name)
         top_k = int(args.get("top_k", 8))
         path_prefix = args.get("path_prefix")
         file_path = args.get("file")
@@ -369,14 +382,23 @@ class MCPHandler:
         return {
             "server": "llm-context-mcp",
             "purpose": "Recupero contesto da codice/documenti indicizzati (RAG).",
+            "multi_project_enabled": self._config.multi_project_enabled,
+            "write_enabled": self._config.write_enabled,
+            "ingest_enabled": self._config.ingest_enabled,
+            "project_count": self._project_registry.project_count(),
+            "default_project_id": self._default_project_id,
             "capabilities": [
                 "rag_context: contesto formattato per analisi codice/documenti",
                 "rag_search: risultati raw di retrieval semantico/keyword",
                 "symbol_search: lookup esatto/prefisso simboli per nome (class/function/method/...)",
+                "list_projects: elenco dei progetti registrati",
+                "get_project_info: dettaglio di un progetto registrato",
             ],
             "boundaries": [
                 "NON e' un sistema di memoria operativa persistente",
                 "NON sostituisce llm-memory per decisioni/preferenze operative",
+                "In multi-project mode le query richiedono project_id esplicito",
+                "L'ingest non e' esposto come tool MCP standard",
             ],
         }
 
@@ -385,7 +407,7 @@ class MCPHandler:
         name = args.get("name")
         if not name:
             raise ValueError("'name' is required for symbol_search")
-        project_id = args.get("project_id") or self._default_project_id
+        project_id = self._resolve_project_id(args, tool_name="symbol_search")
         kind = args.get("kind") or None
         language = args.get("language") or None
         exact = parse_bool(str(args.get("exact", False)))
@@ -429,6 +451,54 @@ class MCPHandler:
             },
         )
         return payload
+
+    def _run_list_projects(self) -> dict[str, Any]:
+        projects = [project.to_public_dict() for project in self._project_registry.list_projects()]
+        return {
+            "count": len(projects),
+            "multi_project_enabled": self._config.multi_project_enabled,
+            "write_enabled": self._config.write_enabled,
+            "ingest_enabled": self._config.ingest_enabled,
+            "projects": projects,
+        }
+
+    def _run_get_project_info(self, args: dict[str, Any]) -> dict[str, Any]:
+        project_id = str(args.get("project_id") or "").strip()
+        if not project_id:
+            raise ValueError("'project_id' is required for get_project_info")
+        project = self._project_registry.require_project(project_id)
+        return project.to_public_dict()
+
+    def _resolve_project_id(self, args: dict[str, Any], *, tool_name: str) -> str:
+        explicit_project_id = str(args.get("project_id") or "").strip()
+        if self._config.multi_project_enabled:
+            if not explicit_project_id:
+                raise ValueError(
+                    f"{tool_name} requires explicit project_id when multi_project_enabled=true"
+                )
+            return self._validate_known_project(explicit_project_id)
+
+        if explicit_project_id:
+            return self._validate_known_project(explicit_project_id)
+
+        if self._project_registry.project_count() == 0:
+            return self._default_project_id
+
+        if self._default_project_id and self._project_registry.get_project(self._default_project_id):
+            return self._default_project_id
+
+        projects = self._project_registry.list_projects()
+        if len(projects) == 1:
+            return projects[0].project_id
+
+        raise ValueError(
+            f"{tool_name} requires explicit project_id because no safe default project is configured"
+        )
+
+    def _validate_known_project(self, project_id: str) -> str:
+        if self._project_registry.project_count() == 0:
+            return project_id
+        return self._project_registry.require_project(project_id).project_id
 
     def _query_symbols(
         self,
@@ -583,6 +653,28 @@ def tool_context_info() -> dict[str, Any]:
         "name": "context_info",
         "description": "Spiega scopo/limiti del MCP llm-context.",
         "inputSchema": {"type": "object", "properties": {}},
+    }
+
+
+def tool_list_projects() -> dict[str, Any]:
+    return {
+        "name": "list_projects",
+        "description": "Elenca i progetti registrati e il relativo stato operativo di ingest/index.",
+        "inputSchema": {"type": "object", "properties": {}},
+    }
+
+
+def tool_get_project_info() -> dict[str, Any]:
+    return {
+        "name": "get_project_info",
+        "description": "Restituisce il dettaglio operativo di un progetto registrato.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_id"],
+            "properties": {
+                "project_id": {"type": "string"},
+            },
+        },
     }
 
 
