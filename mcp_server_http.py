@@ -478,6 +478,10 @@ def _jsonrpc_transport_error(message: str) -> dict[str, Any]:
     }
 
 
+def _build_health_payload(handler: MCPHandler) -> dict[str, Any]:
+    return handler.get_operational_status(ready=handler._ready.is_set())
+
+
 def _coerce_rpc_message(body: Any) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise ValueError("/rpc expects a JSON object body")
@@ -699,8 +703,7 @@ async def run_http_server(
 
     async def handle_health(request: web.Request) -> web.Response:
         """Health check endpoint."""
-        ready = handler._ready.is_set()
-        return web.json_response({"status": "ready" if ready else "loading"})
+        return web.json_response(_build_health_payload(handler))
 
     async def handle_rpc(request: web.Request) -> web.Response:
         """Handle synchronous JSON-RPC messages (no SSE)."""

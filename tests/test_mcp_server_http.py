@@ -195,3 +195,20 @@ async def test_read_json_body_rejects_oversized_payload():
 
     with pytest.raises(ValueError, match="too large"):
         await mcp_server_http._read_json_body(FakeRequest(), 1024)
+
+
+def test_build_health_payload_uses_handler_operational_status():
+    class FakeReady:
+        def is_set(self):
+            return True
+
+    class FakeHandler:
+        def __init__(self):
+            self._ready = FakeReady()
+
+        def get_operational_status(self, *, ready):
+            return {"status": "ready" if ready else "loading", "project_count": 2}
+
+    payload = mcp_server_http._build_health_payload(FakeHandler())
+
+    assert payload == {"status": "ready", "project_count": 2}
