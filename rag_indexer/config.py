@@ -87,7 +87,9 @@ def parse_csv_list(value: Optional[str]) -> list[str]:
 
 def load_config(path: Optional[str]) -> AppConfig:
     if path is None:
-        return AppConfig()
+        config = AppConfig()
+        _apply_env_overrides(config)
+        return config
     if not os.path.exists(path):
         raise FileNotFoundError(f"Config not found: {path}")
     with open(path, "r", encoding="utf-8") as handle:
@@ -99,6 +101,7 @@ def load_config(path: Optional[str]) -> AppConfig:
     config_dir = Path(path).resolve().parent
     config.projects_registry_path = _resolve_path(config.projects_registry_path, config_dir)
     config.projects_state_path = _resolve_path(config.projects_state_path, config_dir)
+    _apply_env_overrides(config)
     return config
 
 
@@ -164,3 +167,18 @@ def _resolve_path(value: Path | str, base_dir: Path) -> Path:
     if not path.is_absolute():
         path = (base_dir / path).resolve()
     return path
+
+
+def _apply_env_overrides(config: AppConfig) -> None:
+    write_enabled_raw = os.getenv("LLM_CONTEXT_WRITE_ENABLED")
+    ingest_enabled_raw = os.getenv("LLM_CONTEXT_INGEST_ENABLED")
+
+    if write_enabled_raw is not None:
+        config.write_enabled = _coerce_bool(write_enabled_raw)
+    if ingest_enabled_raw is not None:
+        config.ingest_enabled = _coerce_bool(ingest_enabled_raw)
+    elif write_enabled_raw is not None:
+        # Dashboard/runtime can expose a single write toggle. When explicitly
+        # enabled, keep ingest aligned unless a more specific ingest override
+        # is provided.
+        config.ingest_enabled = config.write_enabled
