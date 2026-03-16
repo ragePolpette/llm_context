@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
+from pathlib import Path
 from typing import Any, Optional, get_args, get_origin
 
 import os
@@ -69,6 +70,12 @@ class AppConfig:
     exclude_globs: list[str] = field(default_factory=list)
     never_index_ext: list[str] = field(default_factory=list)
     symbol_search_enabled: bool = True
+    multi_project_enabled: bool = False
+    default_project_id: str = "myproj"
+    projects_registry_path: Path = field(default_factory=lambda: Path("projects.yaml"))
+    projects_state_path: Path = field(default_factory=lambda: Path("projects.state.json"))
+    ingest_enabled: bool = False
+    write_enabled: bool = False
 
 
 def parse_csv_list(value: Optional[str]) -> list[str]:
@@ -89,6 +96,9 @@ def load_config(path: Optional[str]) -> AppConfig:
     for field in fields(config):
         if field.name in data:
             setattr(config, field.name, _coerce_value(data[field.name], field.type))
+    config_dir = Path(path).resolve().parent
+    config.projects_registry_path = _resolve_path(config.projects_registry_path, config_dir)
+    config.projects_state_path = _resolve_path(config.projects_state_path, config_dir)
     return config
 
 
@@ -101,6 +111,8 @@ def _coerce_value(value: Any, target_type: Any) -> Any:
         return str(value)
     if target_type is bool:
         return _coerce_bool(value)
+    if target_type is Path:
+        return Path(value)
     origin = get_origin(target_type)
     if origin is list:
         return _coerce_list(value)
@@ -145,3 +157,10 @@ def _coerce_dict(value: Any) -> dict[str, list[str]]:
             result[str(key)] = _coerce_list(items)
         return result
     return {}
+
+
+def _resolve_path(value: Path | str, base_dir: Path) -> Path:
+    path = value if isinstance(value, Path) else Path(value)
+    if not path.is_absolute():
+        path = (base_dir / path).resolve()
+    return path
