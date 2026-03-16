@@ -498,7 +498,9 @@ class MCPHandler:
         if self._config.multi_project_enabled:
             if not explicit_project_id:
                 raise ValueError(
-                    f"{tool_name} requires explicit project_id when multi_project_enabled=true"
+                    f"{tool_name} requires explicit project_id in multi-project mode. This is a read-plane MCP tool; "
+                    "when multi_project_enabled=true, you must pass project_id explicitly and "
+                    "no implicit default project is used."
                 )
             return self._validate_known_project(explicit_project_id)
 
@@ -516,7 +518,8 @@ class MCPHandler:
             return projects[0].project_id
 
         raise ValueError(
-            f"{tool_name} requires explicit project_id because no safe default project is configured"
+            f"{tool_name} could not resolve a safe default project in single-project mode. "
+            "Pass project_id explicitly or configure a default project for the read-plane."
         )
 
     def _validate_known_project(self, project_id: str) -> str:
@@ -632,15 +635,26 @@ def tool_rag_context() -> dict[str, Any]:
     return {
         "name": "rag_context",
         "description": (
-            "Recupera contesto RAG da codice/documenti indicizzati. "
-            "Usare solo per context retrieval tecnico; non salva memorie operative."
+            "Read-plane MCP tool per recuperare contesto RAG da codice/documenti indicizzati. "
+            "Usare solo per context retrieval tecnico; non salva memorie operative e non esegue "
+            "ingest/index refresh. In single-project mode puo' usare il default project se "
+            "configurato in modo sicuro; in multi-project mode richiede project_id esplicito e "
+            "non usa alcun default implicito. Per write_enabled/ingest_enabled, refresh indice e "
+            "operazioni di ingest-plane usare context_info e la CLI operativa."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query_text": {"type": "string"},
                 "query_embedding": {"type": "array", "items": {"type": "number"}},
-                "project_id": {"type": "string"},
+                "project_id": {
+                    "type": "string",
+                    "description": (
+                        "Project scope per la retrieval. In multi-project mode "
+                        "(multi_project_enabled=true) e' obbligatorio; in single-project mode "
+                        "puo' essere omesso solo se il server supporta un default project sicuro."
+                    ),
+                },
                 "top_k": {"type": "integer"},
                 "path_prefix": {"type": "string"},
                 "file": {"type": "string"},
@@ -665,8 +679,10 @@ def tool_rag_search() -> dict[str, Any]:
     tool = tool_rag_context()
     tool["name"] = "rag_search"
     tool["description"] = (
-        "Recupera match RAG raw su codice/documenti (no contesto formattato). "
-        "Non e' un memory store operativo."
+        "Read-plane MCP tool che restituisce match RAG raw su codice/documenti indicizzati "
+        "(senza contesto formattato). Non e' un memory store operativo e non esegue ingest o "
+        "refresh indice. In single-project mode puo' usare un default project solo se "
+        "supportato in modo sicuro; in multi-project mode richiede project_id esplicito."
     )
     return tool
 
@@ -708,7 +724,10 @@ def tool_symbol_search() -> dict[str, Any]:
         "name": "symbol_search",
         "description": (
             "Cerca simboli (class, function, method, interface, enum, struct, type) per nome "
-            "nel codice indicizzato. Restituisce line_start, line_end, signature e path del file."
+            "nel codice indicizzato. E' un tool di read-plane: non aggiorna l'indice e non fa "
+            "operazioni di ingest-plane. In multi-project mode richiede project_id esplicito; in "
+            "single-project mode puo' usare il default project solo se configurato in modo "
+            "sicuro. Restituisce line_start, line_end, signature e path del file."
         ),
         "inputSchema": {
             "type": "object",
@@ -722,7 +741,14 @@ def tool_symbol_search() -> dict[str, Any]:
                     "type": "string",
                     "description": "Filtro tipo: class | function | method | interface | enum | struct | type",
                 },
-                "project_id": {"type": "string"},
+                "project_id": {
+                    "type": "string",
+                    "description": (
+                        "Project scope per la ricerca simboli. In multi-project mode "
+                        "(multi_project_enabled=true) e' obbligatorio; in single-project mode "
+                        "puo' essere omesso solo se il server espone un default project sicuro."
+                    ),
+                },
                 "language": {
                     "type": "string",
                     "description": "Filtro linguaggio: python | javascript | typescript | csharp",
