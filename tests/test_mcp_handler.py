@@ -2,7 +2,13 @@ import pytest
 import yaml
 
 from rag_indexer import mcp_handler as mcp_handler_module
-from rag_indexer.mcp_handler import MCPHandler, tool_rag_context, tool_symbol_search
+from rag_indexer.mcp_handler import (
+    MCPHandler,
+    format_tool_text,
+    tool_map_work_item_to_codebase,
+    tool_rag_context,
+    tool_symbol_search,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -27,9 +33,11 @@ def test_handler_requires_default_dsn(monkeypatch, no_warmup):
 def test_tool_schemas_do_not_expose_dsn():
     rag_props = tool_rag_context()["inputSchema"]["properties"]
     symbol_props = tool_symbol_search()["inputSchema"]["properties"]
+    mapping_props = tool_map_work_item_to_codebase()["inputSchema"]["properties"]
 
     assert "dsn" not in rag_props
     assert "dsn" not in symbol_props
+    assert "dsn" not in mapping_props
 
 
 def test_rag_context_uses_configured_default_dsn(monkeypatch, no_warmup):
@@ -42,6 +50,7 @@ def test_rag_context_uses_configured_default_dsn(monkeypatch, no_warmup):
     monkeypatch.setattr(mcp_handler_module, "build_context", fake_build_context)
     handler = MCPHandler()
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
+    monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [])
 
     payload = handler._run_rag_context(
         {
@@ -52,6 +61,52 @@ def test_rag_context_uses_configured_default_dsn(monkeypatch, no_warmup):
 
     assert captured["dsn"] == "postgresql://ctx_user:ctx_pass@localhost:5432/postgres"
     assert payload["meta"]["project_id"] == "myproj"
+    assert "functional_context" in payload
+
+
+def test_rag_context_retries_without_auto_scope_when_derived_prefix_has_no_hits(monkeypatch, no_warmup):
+    calls = []
+
+    def fake_build_context(**kwargs):
+        calls.append(kwargs["path_prefix"])
+        if len(calls) == 1:
+            return "ctx-empty", []
+        return "ctx-final", [{"path": "pubblico/api/Controllers/Fattura.cs", "score": 0.91, "content": "match"}]
+
+    monkeypatch.setattr(mcp_handler_module, "build_context", fake_build_context)
+    monkeypatch.setattr(mcp_handler_module, "resolve_path_prefix", lambda **kwargs: "pubblico/api/Controllers/Fattura.cs")
+    monkeypatch.setattr(mcp_handler_module, "format_context_sheet", lambda **kwargs: "sheet")
+    handler = MCPHandler()
+    monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
+    monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [])
+
+    payload = handler._run_rag_context({"query_text": "GeneraFattura fatturazione studi"})
+
+    assert calls == ["pubblico/api/Controllers/Fattura.cs", None]
+    assert payload["meta"]["auto_scope_fallback_used"] is True
+    assert payload["meta"]["initial_path_prefix"] == "pubblico/api/Controllers/Fattura.cs"
+    assert payload["meta"]["path_prefix"] is None
+
+
+def test_rag_context_does_not_retry_when_path_prefix_is_explicit(monkeypatch, no_warmup):
+    calls = []
+
+    def fake_build_context(**kwargs):
+        calls.append(kwargs["path_prefix"])
+        return "ctx-empty", []
+
+    monkeypatch.setattr(mcp_handler_module, "build_context", fake_build_context)
+    monkeypatch.setattr(mcp_handler_module, "format_context_sheet", lambda **kwargs: "sheet")
+    handler = MCPHandler()
+    monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
+    monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [])
+
+    payload = handler._run_rag_context(
+        {"query_text": "GeneraFattura", "path_prefix": "pubblico/api/Controllers/Fattura.cs"}
+    )
+
+    assert calls == ["pubblico\\api\\Controllers\\Fattura.cs"]
+    assert payload["meta"]["auto_scope_fallback_used"] is False
 
 
 def test_symbol_search_uses_configured_default_dsn(monkeypatch, no_warmup):
@@ -87,6 +142,16 @@ def test_symbol_search_uses_configured_default_dsn(monkeypatch, no_warmup):
     assert captured["dsn"] == "postgresql://ctx_user:ctx_pass@localhost:5432/postgres"
     assert captured["closed"] is True
     assert payload["count"] == 1
+
+
+def test_context_info_exposes_tool_map_and_usage_notes(no_warmup):
+    handler = MCPHandler()
+
+    payload = handler._run_context_info()
+
+    assert "tool_map" in payload
+    assert "rag_context" in payload["tool_map"]["working_context"]
+    assert payload["usage_notes"]["rag_search"].startswith("Tool raw/debug")
 
 
 def test_symbol_search_uses_pool_when_available(monkeypatch, no_warmup):
@@ -251,7 +316,103 @@ def test_list_projects_returns_registered_projects(monkeypatch, no_warmup, tmp_p
 
     assert payload["count"] == 2
     assert payload["multi_project_enabled"] is True
-    assert [project["project_id"] for project in payload["projects"]] == ["alpha", "beta"]
+
+
+def test_map_work_item_to_codebase_returns_structured_mapping(monkeypatch, no_warmup, tmp_path):
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+
+    monkeypatch.setattr(
+        handler,
+        "_run_rag_context",
+        lambda args, tool_name="rag_context": {
+            "functional_context": {
+                "summary": {
+                    "core_file_count": 2,
+                    "supporting_match_count": 1,
+                    "symbol_hit_count": 1,
+                },
+                "entry_points": [
+                    {
+                        "name": "GeneraFattura",
+                        "kind": "method",
+                        "source_path": "pubblico\\api\\Controllers\\Fattura.cs",
+                        "line_start": 120,
+                        "line_end": 180,
+                    }
+                ],
+                "core_files": [
+                    {
+                        "source_path": "pubblico\\api\\Controllers\\Fattura.cs",
+                        "aggregate_score": 1.75,
+                        "max_score": 0.9,
+                        "match_count": 3,
+                        "symbol_hits": [{"name": "GeneraFattura"}],
+                    },
+                    {
+                        "source_path": "pubblico\\api\\Services\\Fatture\\Generator.cs",
+                        "aggregate_score": 0.65,
+                        "max_score": 0.5,
+                        "match_count": 1,
+                        "symbol_hits": [],
+                    },
+                ],
+                "supporting_matches": [],
+            }
+        },
+    )
+
+    payload = handler._run_map_work_item_to_codebase(
+        {
+            "ticket_key": "BPO-123",
+            "summary": "Errore generazione fattura",
+            "description": "La fatturazione studio fallisce in alcuni casi.",
+            "product_target_hint": "legacy",
+            "project_id": "alpha",
+        }
+    )
+
+    assert payload["ticket_key"] == "BPO-123"
+    assert payload["project_id"] == "alpha"
+    assert payload["product_target"] == "legacy"
+    assert payload["repo_target"] == "alpha"
+    assert payload["in_scope"] is True
+    assert payload["feasibility"] in {"high", "medium"}
+    assert "GeneraFattura" in payload["implementation_hint"]
+    assert payload["paths"][0] == "pubblico\\api\\Controllers\\Fattura.cs"
+
+
+def test_map_work_item_to_codebase_accepts_workspace_root(monkeypatch, no_warmup, tmp_path):
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+
+    monkeypatch.setattr(
+        handler,
+        "_run_rag_context",
+        lambda args, tool_name="rag_context": {
+            "functional_context": {
+                "summary": {
+                    "core_file_count": 0,
+                    "supporting_match_count": 0,
+                    "symbol_hit_count": 0,
+                },
+                "entry_points": [],
+                "core_files": [],
+                "supporting_matches": [],
+            }
+        },
+    )
+
+    alpha_root = handler._project_registry.require_project("alpha").root_path
+    payload = handler._run_map_work_item_to_codebase(
+        {
+            "summary": "Ticket senza hit",
+            "workspace_root": str(alpha_root),
+        }
+    )
+
+    assert payload["project_id"] == "alpha"
+    assert payload["in_scope"] is False
+    assert payload["feasibility"] in {"blocked", "out_of_scope"}
+    assert payload["blockers"]
 
 
 def test_get_project_info_returns_registry_entry(monkeypatch, no_warmup, tmp_path):
@@ -290,11 +451,86 @@ def test_single_project_mode_keeps_safe_default_fallback(monkeypatch, no_warmup,
         )
     )
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
+    monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [])
 
     payload = handler._run_rag_context({"query_text": "bpofh"})
 
     assert captured["project_id"] == "alpha"
     assert payload["meta"]["project_id"] == "alpha"
+
+
+def test_rag_context_default_format_returns_functional_text():
+    text = format_tool_text(
+        "rag_context",
+        {},
+        {
+            "functional_context": {
+                "query": {"text": "fatturazione studi", "path_prefix": "pubblico\\api"},
+                "summary": {
+                    "core_file_count": 1,
+                    "supporting_match_count": 2,
+                    "symbol_hit_count": 1,
+                },
+                "entry_points": [
+                    {
+                        "kind": "method",
+                        "name": "GeneraFattura",
+                        "source_path": "pubblico/api/Controllers/Fattura.cs",
+                        "line_start": 10,
+                        "line_end": 30,
+                    }
+                ],
+                "core_files": [
+                    {
+                        "source_path": "pubblico/api/Controllers/Fattura.cs",
+                        "aggregate_score": 1.2,
+                        "match_count": 2,
+                        "symbol_hits": [{}],
+                    }
+                ],
+                "supporting_matches": [],
+                "assembled_context": "FILE pubblico/api/Controllers/Fattura.cs\n...",
+            },
+            "context": "legacy ctx",
+            "context_sheet": "legacy sheet",
+        },
+    )
+
+    assert text.startswith("FUNCTIONAL CONTEXT")
+    assert "ENTRY POINTS" in text
+    assert "ASSEMBLED CONTEXT" in text
+
+
+def test_rag_context_legacy_format_returns_legacy_context():
+    text = format_tool_text(
+        "rag_context",
+        {"format": "legacy"},
+        {
+            "functional_context": {"assembled_context": "new"},
+            "context": "legacy ctx",
+            "context_sheet": "legacy sheet",
+        },
+    )
+
+    assert text == "legacy ctx"
+
+
+def test_rag_search_returns_raw_results_without_formatted_context(monkeypatch, no_warmup):
+    def fake_build_context(**kwargs):
+        return "ctx", [{"source_path": "a.cs", "score": 0.9, "text": "x"}]
+
+    monkeypatch.setattr(mcp_handler_module, "build_context", fake_build_context)
+    handler = MCPHandler()
+    monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
+    monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [{"name": "X"}])
+
+    payload = handler._run_rag_search({"query_text": "fatturazione"})
+
+    assert "context" not in payload
+    assert "context_sheet" not in payload
+    assert "functional_context" not in payload
+    assert "symbol_results" not in payload
+    assert payload["results"][0]["source_path"] == "a.cs"
 
 
 def test_context_operational_status_exposes_project_summary(monkeypatch, no_warmup, tmp_path):
