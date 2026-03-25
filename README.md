@@ -216,21 +216,38 @@ Riduce tempi di ingest e mantiene consistenza senza full reindex.
 ## Prerequisiti
 
 - Python 3.10+
-- Docker (per Postgres + pgvector)
+- PostgreSQL con estensione `pgvector` disponibile in locale o su rete interna
 - Connessione Internet solo per scaricare i pesi del modello locale al primo avvio
 
-## Avvio Postgres + pgvector (Docker)
+## Database: modello operativo non-Docker
 
-Se il container non esiste:
+Il processo `llm-context` deve essere gestito come gli altri MCP:
+
+- processo Python normale
+- start/stop da dashboard o script locali
+- DSN passato via env/runtime
+
+Il database puo' essere:
+
+- un PostgreSQL locale installato sulla macchina
+- un PostgreSQL interno gia' esistente
+- opzionalmente un container Docker, ma **solo come scelta di provisioning del DB**
+
+Docker quindi non fa piu' parte del modello operativo del servizio.
+Il target del rework e' `non-Docker first`.
+
+## Database locale: requisiti minimi
+
+Serve un PostgreSQL raggiungibile dal DSN e con:
+
+- estensione `vector`
+- estensione `unaccent`
+- permessi per creare tabelle/indici dello schema v2
+
+Esempio DSN:
 
 ```bash
-docker run --name pgvector -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d pgvector/pgvector:pg15
-```
-
-Se esiste gia':
-
-```bash
-docker start pgvector
+postgresql://<user>:<password>@localhost:5432/postgres
 ```
 
 ## Installazione dipendenze
@@ -432,10 +449,10 @@ Se vedi un errore tipo `expected 768 dimensions, not 384`, la tabella e' stata c
 Esegui il reset completo (drop + init).
 
 ### `psql` non riconosciuto
-Usa `psql` dentro Docker:
+Usa `psql` sul database locale o remoto raggiungibile dal DSN:
 
 ```bash
-docker exec -it pgvector psql -U postgres -d postgres -c "SELECT count(*) FROM chunks;"
+psql "postgresql://<user>:<password>@localhost:5432/postgres" -c "SELECT count(*) FROM chunks;"
 ```
 
 ## Note su privacy
