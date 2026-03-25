@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import uuid
@@ -17,6 +18,7 @@ from typing import Any, Optional
 
 from rag_indexer.agent_context import build_context
 from rag_indexer.config import load_config
+from rag_indexer.context_assembler import assemble_functional_context
 from rag_indexer.db import get_connection, get_pool
 from rag_indexer.embedder import (
     DummyEmbedder,
@@ -27,6 +29,7 @@ from rag_indexer.embedder import (
 from rag_indexer.path_utils import parse_bool, resolve_path_prefix
 from rag_indexer.project_registry import load_project_registry
 from rag_indexer.store import RagStore
+from rag_indexer.work_item_mapper import map_work_item_to_codebase
 
 
 def load_dotenv() -> None:
@@ -185,6 +188,7 @@ class MCPHandler:
                     "tools": [
                         tool_rag_context(),
                         tool_rag_search(),
+                        tool_map_work_item_to_codebase(),
                         tool_context_info(),
                         tool_symbol_search(),
                         tool_list_projects(),
@@ -224,6 +228,8 @@ class MCPHandler:
                     payload = self._run_rag_context(args)
                 elif name == "rag_search":
                     payload = self._run_rag_search(args)
+                elif name == "map_work_item_to_codebase":
+                    payload = self._run_map_work_item_to_codebase(args)
                 elif name == "context_info":
                     payload = self._run_context_info()
                 elif name == "symbol_search":
@@ -293,6 +299,7 @@ class MCPHandler:
         path_prefix = args.get("path_prefix")
         file_path = args.get("file")
         auto_scope = parse_bool(str(args.get("auto_scope", True)))
+        explicit_scope = bool(path_prefix or file_path)
         default_max_chars = int(os.getenv("LLM_CONTEXT_MAX_CHARS", "12000"))
         max_chars = int(args.get("max_chars", default_max_chars))
         doc_type = args.get("doc_type") or self._config.default_doc_type
@@ -341,6 +348,29 @@ class MCPHandler:
             min_score=self._config.min_score,
             header_penalty=self._config.header_penalty,
         )
+        auto_scope_fallback_used = False
+        initial_resolved_prefix = resolved_prefix
+        if not results and resolved_prefix and auto_scope and not explicit_scope:
+            context, results = build_context(
+                dsn=self._default_dsn,
+                embedder=embedder,
+                embedding_dim=embedding_dim,
+                project_id=project_id,
+                query_text=query_text,
+                query_embedding=query_embedding,
+                top_k=top_k,
+                path_prefix=None,
+                max_chars=max_chars,
+                doc_type=doc_type,
+                language=language,
+                vector_weight=self._config.vector_weight,
+                keyword_weight=self._config.keyword_weight,
+                max_chunks_per_doc=self._config.max_chunks_per_doc,
+                min_score=self._config.min_score,
+                header_penalty=self._config.header_penalty,
+            )
+            resolved_prefix = None
+            auto_scope_fallback_used = True
         context_sheet = format_context_sheet(
             query_text=query_text,
             path_prefix=resolved_prefix,
@@ -348,15 +378,31 @@ class MCPHandler:
             results=results,
             max_chars=max_chars,
         )
+        symbol_results = self._collect_context_symbols(
+            query_text=query_text,
+            project_id=project_id,
+            language=language,
+            embedding_dim=embedding_dim,
+        )
+        functional_context = assemble_functional_context(
+            query_text=query_text,
+            retrieval_results=results,
+            symbol_results=symbol_results,
+            path_prefix=resolved_prefix,
+        )
         payload = {
+            "functional_context": functional_context,
             "context": context,
             "context_sheet": context_sheet,
             "results": results,
+            "symbol_results": symbol_results,
             "meta": {
                 "project_id": project_id,
                 "top_k": top_k,
                 "path_prefix": resolved_prefix,
                 "max_chars": max_chars,
+                "auto_scope_fallback_used": auto_scope_fallback_used,
+                "initial_path_prefix": initial_resolved_prefix,
             },
         }
         self._log_activity(
@@ -372,9 +418,12 @@ class MCPHandler:
         return payload
 
     def _run_rag_search(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Execute rag_search tool (same as rag_context but without formatted context)."""
+        """Execute rag_search tool returning raw retrieval data."""
         payload = self._run_rag_context(args, tool_name="rag_search")
+        payload.pop("functional_context", None)
         payload.pop("context", None)
+        payload.pop("context_sheet", None)
+        payload.pop("symbol_results", None)
         return payload
 
     def _run_context_info(self) -> dict[str, Any]:
@@ -387,13 +436,27 @@ class MCPHandler:
             "ingest_enabled": self._config.ingest_enabled,
             "project_count": self._project_registry.project_count(),
             "default_project_id": self._default_project_id,
+            "tool_map": {
+                "working_context": ["rag_context", "map_work_item_to_codebase"],
+                "inspection": ["rag_search", "symbol_search"],
+                "discovery": ["context_info", "list_projects", "get_project_info"],
+            },
             "capabilities": [
                 "rag_context: contesto formattato per analisi codice/documenti",
                 "rag_search: risultati raw di retrieval semantico/keyword",
+                "map_work_item_to_codebase: mapping strutturato tra richiesta funzionale e codebase",
                 "symbol_search: lookup esatto/prefisso simboli per nome (class/function/method/...)",
                 "list_projects: elenco dei progetti registrati",
                 "get_project_info: dettaglio di un progetto registrato",
             ],
+            "usage_notes": {
+                "rag_context": "Tool principale per lavorare: restituisce functional context assemblato di default.",
+                "rag_search": "Tool raw/debug: restituisce retrieval grezzo senza assembly.",
+                "map_work_item_to_codebase": (
+                    "Tool strutturato per mappare richieste funzionali o ticket verso prodotto/repo/area."
+                ),
+                "symbol_search": "Tool di precisione per lookup simboli; utile per disambiguare nomi tecnici.",
+            },
             "boundaries": [
                 "NON e' un sistema di memoria operativa persistente",
                 "NON sostituisce llm-memory per decisioni/preferenze operative",
@@ -451,6 +514,51 @@ class MCPHandler:
             },
         )
         return payload
+
+    def _run_map_work_item_to_codebase(self, args: dict[str, Any]) -> dict[str, Any]:
+        summary = str(args.get("summary") or "").strip()
+        description = str(args.get("description") or "").strip()
+        if not summary and not description:
+            raise ValueError("summary or description is required")
+
+        project_id = self._resolve_mapping_project_id(args)
+        project_record = self._project_registry.get_project(project_id)
+        mapping_query = "\n\n".join(part for part in [summary, description] if part).strip()
+        rag_args = {
+            "query_text": mapping_query,
+            "project_id": project_id,
+            "top_k": int(args.get("top_k", 8)),
+            "auto_scope": False,
+            "format": "json",
+        }
+        if args.get("language"):
+            rag_args["language"] = args.get("language")
+        if args.get("doc_type"):
+            rag_args["doc_type"] = args.get("doc_type")
+        if args.get("path_prefix"):
+            rag_args["path_prefix"] = args.get("path_prefix")
+
+        rag_payload = self._run_rag_context(rag_args, tool_name="map_work_item_to_codebase")
+        mapping = map_work_item_to_codebase(
+            summary=summary,
+            description=description,
+            product_target_hint=args.get("product_target_hint"),
+            project_record=project_record or type("ProjectStub", (), {"project_id": project_id, "root_path": project_id})(),
+            functional_context=rag_payload.get("functional_context") or {},
+        )
+        mapping.update(
+            {
+                "ticket_key": str(args.get("ticket_key") or "").strip() or None,
+                "project_id": project_id,
+                "workspace_root": str(
+                    args.get("workspace_root")
+                    or getattr(project_record, "root_path", "")
+                    or ""
+                ).strip()
+                or None,
+            }
+        )
+        return mapping
 
     def _run_list_projects(self) -> dict[str, Any]:
         projects = [project.to_public_dict() for project in self._project_registry.list_projects()]
@@ -522,6 +630,34 @@ class MCPHandler:
             "Pass project_id explicitly or configure a default project for the read-plane."
         )
 
+    def _resolve_mapping_project_id(self, args: dict[str, Any]) -> str:
+        explicit_project_id = str(args.get("project_id") or "").strip()
+        if explicit_project_id:
+            return self._validate_known_project(explicit_project_id)
+
+        workspace_root = str(args.get("workspace_root") or "").strip()
+        if workspace_root and self._project_registry.project_count() > 0:
+            try:
+                resolved = Path(workspace_root).expanduser().resolve()
+            except Exception:
+                resolved = Path(workspace_root)
+            matches = []
+            for project in self._project_registry.list_projects():
+                try:
+                    project_root = Path(project.root_path).resolve()
+                except Exception:
+                    project_root = Path(project.root_path)
+                if resolved == project_root or str(resolved).startswith(str(project_root)) or str(project_root).startswith(str(resolved)):
+                    matches.append(project.project_id)
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise ValueError(
+                    "workspace_root matches multiple registered projects. Pass project_id explicitly."
+                )
+
+        return self._resolve_project_id(args, tool_name="map_work_item_to_codebase")
+
     def _validate_known_project(self, project_id: str) -> str:
         if self._project_registry.project_count() == 0:
             return project_id
@@ -567,6 +703,44 @@ class MCPHandler:
             )
         finally:
             conn.close()
+
+    def _collect_context_symbols(
+        self,
+        *,
+        query_text: Any,
+        project_id: str,
+        language: Optional[str],
+        embedding_dim: int,
+    ) -> list[dict[str, Any]]:
+        candidates = _derive_symbol_candidates(query_text)
+        if not candidates:
+            return []
+        collected: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for candidate in candidates:
+            try:
+                matches = self._query_symbols(
+                    name=candidate,
+                    project_id=project_id,
+                    kind=None,
+                    language=language,
+                    exact=False,
+                    limit=5,
+                    embedding_dim=embedding_dim,
+                )
+            except Exception:
+                continue
+            for item in matches:
+                key = (
+                    str(item.get("source_path") or ""),
+                    str(item.get("name") or ""),
+                    str(item.get("kind") or ""),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                collected.append(item)
+        return collected
 
     def _validate_query_embedding(
         self,
@@ -635,7 +809,7 @@ def tool_rag_context() -> dict[str, Any]:
     return {
         "name": "rag_context",
         "description": (
-            "Read-plane MCP tool per recuperare contesto RAG da codice/documenti indicizzati. "
+            "Read-plane MCP tool per recuperare contesto funzionale assemblato da codice/documenti indicizzati. "
             "Usare solo per context retrieval tecnico; non salva memorie operative e non esegue "
             "ingest/index refresh. In single-project mode puo' usare il default project se "
             "configurato in modo sicuro; in multi-project mode richiede project_id esplicito e "
@@ -667,7 +841,7 @@ def tool_rag_context() -> dict[str, Any]:
                 "language": {"type": "string"},
                 "format": {
                     "type": "string",
-                    "description": "text (default), sheet, or json",
+                    "description": "functional (default), legacy, sheet, or json",
                 },
             },
         },
@@ -685,6 +859,39 @@ def tool_rag_search() -> dict[str, Any]:
         "supportato in modo sicuro; in multi-project mode richiede project_id esplicito."
     )
     return tool
+
+
+def tool_map_work_item_to_codebase() -> dict[str, Any]:
+    return {
+        "name": "map_work_item_to_codebase",
+        "description": (
+            "Mappa una richiesta funzionale o ticket verso la codebase indicizzata e restituisce "
+            "un payload strutturato con repo_target, area, fattibilita', hint implementativo, path "
+            "rilevanti e blocker. Usa il motore di contesto funzionale del read-plane."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["summary"],
+            "properties": {
+                "ticket_key": {"type": "string"},
+                "summary": {"type": "string"},
+                "description": {"type": "string"},
+                "product_target_hint": {"type": "string"},
+                "project_id": {
+                    "type": "string",
+                    "description": "Project scope esplicito. Preferito quando disponibile.",
+                },
+                "workspace_root": {
+                    "type": "string",
+                    "description": "Workspace o repo root locale da usare per risolvere il project scope.",
+                },
+                "path_prefix": {"type": "string"},
+                "doc_type": {"type": "string"},
+                "language": {"type": "string"},
+                "top_k": {"type": "integer"},
+            },
+        },
+    }
 
 
 def tool_context_info() -> dict[str, Any]:
@@ -770,9 +977,11 @@ def format_tool_text(name: str, args: dict[str, Any], payload: dict[str, Any]) -
     if name == "rag_context":
         if format_hint in {"json", "full"}:
             return json.dumps(payload, indent=2, ensure_ascii=True, cls=UUIDEncoder)
+        if format_hint in {"legacy", "text"}:
+            return str(payload.get("context", ""))
         if format_hint in {"sheet", "context-sheet"}:
             return str(payload.get("context_sheet", ""))
-        return str(payload.get("context", ""))
+        return format_functional_context_text(payload.get("functional_context") or {})
     return json.dumps(payload, indent=2, ensure_ascii=True, cls=UUIDEncoder)
 
 
@@ -816,3 +1025,91 @@ def format_context_sheet(
     if max_chars > 0 and len(sheet) > max_chars:
         return sheet[: max_chars - 3] + "..."
     return sheet
+
+
+def format_functional_context_text(payload: dict[str, Any]) -> str:
+    query = payload.get("query") or {}
+    summary = payload.get("summary") or {}
+    entry_points = payload.get("entry_points") or []
+    core_files = payload.get("core_files") or []
+    supporting_matches = payload.get("supporting_matches") or []
+    assembled_context = str(payload.get("assembled_context") or "").strip()
+
+    lines: list[str] = [
+        "FUNCTIONAL CONTEXT",
+        f"query: {str(query.get('text') or '(vuoto)')}",
+        f"scope: {str(query.get('path_prefix') or '(nessuno)')}",
+        (
+            "summary: "
+            f"core_files={int(summary.get('core_file_count') or 0)} "
+            f"supporting_matches={int(summary.get('supporting_match_count') or 0)} "
+            f"symbol_hits={int(summary.get('symbol_hit_count') or 0)}"
+        ),
+        "",
+    ]
+    if entry_points:
+        lines.append("ENTRY POINTS")
+        for item in entry_points:
+            lines.append(
+                f"- {item.get('kind') or 'symbol'} {item.get('name') or '(unknown)'} "
+                f"{item.get('source_path') or ''} "
+                f"#L{item.get('line_start')}-{item.get('line_end')}".rstrip()
+            )
+        lines.append("")
+    if core_files:
+        lines.append("CORE FILES")
+        for item in core_files:
+            lines.append(
+                f"- {item.get('source_path')} score={float(item.get('aggregate_score', 0.0)):.4f} "
+                f"matches={int(item.get('match_count') or 0)} symbols={len(item.get('symbol_hits') or [])}"
+            )
+        lines.append("")
+    if supporting_matches:
+        lines.append("SUPPORTING MATCHES")
+        for item in supporting_matches[:5]:
+            lines.append(
+                f"- {item.get('source_path')} #L{item.get('line_start')}-{item.get('line_end')} "
+                f"score={float(item.get('score', 0.0)):.4f}"
+            )
+        lines.append("")
+    if assembled_context:
+        lines.append("ASSEMBLED CONTEXT")
+        lines.append(assembled_context)
+    return "\n".join(lines).strip()
+
+
+def _derive_symbol_candidates(query_text: Any, *, limit: int = 4) -> list[str]:
+    if not isinstance(query_text, str):
+        return []
+    text = query_text.strip()
+    if not text:
+        return []
+    candidates: list[str] = []
+    parts = [part for part in re.split(r"[^A-Za-z0-9_]+", text) if part]
+    if len(parts) == 1 and _looks_like_symbol(parts[0]):
+        candidates.append(parts[0])
+    for part in parts:
+        if _looks_like_symbol(part):
+            candidates.append(part)
+        if len(candidates) >= limit:
+            break
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in candidates:
+        normalized = item.strip()
+        lower = normalized.lower()
+        if lower in seen:
+            continue
+        seen.add(lower)
+        result.append(normalized)
+    return result[:limit]
+
+
+def _looks_like_symbol(token: str) -> bool:
+    if len(token) < 3:
+        return False
+    if "_" in token:
+        return True
+    if any(char.isupper() for char in token[1:]):
+        return True
+    return token.isidentifier() and token.lower() != token

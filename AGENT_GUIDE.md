@@ -5,9 +5,15 @@ Il DB contiene i chunk indicizzati dal progetto (schema v2).
 
 ## Prerequisiti
 
-- Postgres + pgvector in esecuzione
+- PostgreSQL + pgvector raggiungibile dal DSN
 - Indice gia' creato e popolato con `ingest`
 - Embedding locali attivi (default: 384 dimensioni)
+
+Nota operativa:
+
+- il servizio MCP gira come processo Python normale
+- Docker non e' richiesto per il servizio
+- se il database e' in Docker e' una scelta di provisioning del DB, non del MCP
 
 ## Opzione A (consigliata): helper Python
 
