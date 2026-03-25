@@ -150,8 +150,11 @@ def test_context_info_exposes_tool_map_and_usage_notes(no_warmup):
     payload = handler._run_context_info()
 
     assert "tool_map" in payload
+    assert "tool_roles" in payload
+    assert "recommended_workflows" in payload
     assert "rag_context" in payload["tool_map"]["working_context"]
-    assert payload["usage_notes"]["rag_search"].startswith("Tool raw/debug")
+    assert payload["tool_roles"]["symbol_search"]["role"] == "precision lookup"
+    assert payload["usage_notes"]["rag_search"].startswith("Tool di approfondimento/raw")
 
 
 def test_symbol_search_uses_pool_when_available(monkeypatch, no_warmup):
@@ -489,6 +492,15 @@ def test_rag_context_default_format_returns_functional_text():
                     }
                 ],
                 "supporting_matches": [],
+                "tool_hints": {
+                    "recommended_follow_up": [
+                        {
+                            "tool": "symbol_search",
+                            "reason": "Usa symbol_search per confermare signature.",
+                            "suggested_names": ["GeneraFattura"],
+                        }
+                    ]
+                },
                 "assembled_context": "FILE pubblico/api/Controllers/Fattura.cs\n...",
             },
             "context": "legacy ctx",
@@ -498,7 +510,39 @@ def test_rag_context_default_format_returns_functional_text():
 
     assert text.startswith("FUNCTIONAL CONTEXT")
     assert "ENTRY POINTS" in text
+    assert "FOLLOW-UP TOOLS" in text
     assert "ASSEMBLED CONTEXT" in text
+
+
+def test_rag_context_payload_exposes_tool_hints(monkeypatch, no_warmup):
+    def fake_build_context(**kwargs):
+        return "ctx", [{"source_path": "a.cs", "score": 0.9, "text": "x"}]
+
+    handler = MCPHandler()
+    monkeypatch.setattr(mcp_handler_module, "build_context", fake_build_context)
+    monkeypatch.setattr(mcp_handler_module, "format_context_sheet", lambda **kwargs: "sheet")
+    monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
+    monkeypatch.setattr(
+        handler,
+        "_collect_context_symbols",
+        lambda **kwargs: [
+            {
+                "name": "GeneraFattura",
+                "kind": "method",
+                "source_path": "pubblico/api/Controllers/Fattura.cs",
+                "line_start": 10,
+                "line_end": 20,
+                "signature": "void GeneraFattura()",
+            }
+        ],
+    )
+
+    payload = handler._run_rag_context({"query_text": "GeneraFattura"})
+
+    tool_hints = payload["functional_context"]["tool_hints"]
+    assert tool_hints["primary_tool"] == "rag_context"
+    assert tool_hints["recommended_follow_up"][0]["tool"] == "symbol_search"
+    assert "GeneraFattura" in tool_hints["recommended_follow_up"][0]["suggested_names"]
 
 
 def test_rag_context_legacy_format_returns_legacy_context():

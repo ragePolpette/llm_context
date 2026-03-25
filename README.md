@@ -31,7 +31,7 @@ I flag principali sono in `config.yaml` / `config.example.yaml`:
 ## Project registry
 
 Il registro progetti e' file-based e inizialmente semplice. Un esempio e' in
-[projects.example.yaml](/C:/Users/Gianmarco/Urgewalt/Yetzirah/llm_context/projects.example.yaml).
+[projects.example.yaml](/C:/Users/Gianmarco/Urgewalt/Yetzirah/llm_context_rework/projects.example.yaml).
 
 Ogni progetto puo' dichiarare almeno:
 
@@ -65,6 +65,14 @@ Il piano MCP standard resta di sola retrieval:
 - `list_projects`
 - `get_project_info`
 - `context_info`
+
+Ruoli operativi consigliati:
+
+- `rag_context`: tool principale per lavorare sul codice; restituisce un package funzionale assemblato
+- `rag_search`: tool di approfondimento/raw per ricerca mirata, debug e conferme
+- `symbol_search`: tool di precisione per signature, linee esatte e disambiguazione simboli
+- `context_info`: discovery del server, ruoli tool, limiti e workflow consigliati
+- `map_work_item_to_codebase`: mapping strutturato richiesta funzionale -> area/repo/path
 
 L'ingest non e' esposto come tool MCP standard.
 L'ingest resta una capability operativa separata, attivabile solo a startup/config level con:
@@ -255,12 +263,12 @@ postgresql://<user>:<password>@localhost:5432/postgres
 Dalla root del repo:
 
 ```bash
-pip install -e llm_context
+pip install -e .
 ```
 
 ## Configurazione
 
-File principale: `llm_context/config.yaml`.
+File principale: `config.yaml`.
 
 Per mantenere i modelli locali dentro il progetto, usa cache locale:
 
@@ -312,7 +320,7 @@ Valori chiave (gia' impostati per uso locale):
 
 ### Scope attuale di indicizzazione (v2)
 
-Nel file `llm_context/config.yaml`:
+Nel file `config.yaml`:
 
 ```
 include_dirs:
@@ -341,7 +349,7 @@ Nota: il matching e' case-insensitive.
 
 ### Come modificare i default in futuro
 
-Modifica `llm_context/config.yaml`:
+Modifica `config.yaml`:
 - `default_doc_type`: usa `code`, `markdown`, `text`, `config` o `null` (nessun filtro).
 - `min_score`: alza per ridurre rumore, abbassa per avere piu' recall.
 - `vector_weight`/`keyword_weight`: bilancia semantica vs keyword (somma consigliata ~1.0).
@@ -361,13 +369,13 @@ Attenzione: questo cancella tutto l'indice esistente.
 
 ```bash
 docker exec -it pgvector psql -U postgres -d postgres -c "DROP TABLE IF EXISTS chunk_embeddings; DROP TABLE IF EXISTS chunks; DROP TABLE IF EXISTS documents;"
-python llm_context/cli.py init-db-v2 --dsn "postgresql://<user>:<password>@localhost:5432/postgres" --embedding-dim 384
+python cli.py init-db-v2 --dsn "postgresql://<user>:<password>@localhost:5432/postgres" --embedding-dim 384
 ```
 
 ## Ingest v2 incrementale (locale, senza invio dati)
 
 ```bash
-python llm_context/cli.py --verbose ingest --incremental \
+python cli.py --verbose ingest --incremental \
   --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --root ./ \
@@ -388,7 +396,7 @@ Se vuoi cambiare modello:
 ## Query di test (v2)
 
 ```bash
-python llm_context/cli.py query \
+python cli.py query \
   --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --text "come funziona X?" \
@@ -400,7 +408,7 @@ python llm_context/cli.py query \
 Oppure usa direttamente un file/dir per filtrare:
 
 ```bash
-python llm_context/cli.py query \
+python cli.py query \
   --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --text "spiegami Attivita" \
@@ -414,7 +422,7 @@ python llm_context/cli.py query \
 Comando che restituisce solo il contesto da incollare nel prompt:
 
 ```bash
-python llm_context/cli.py context \
+python cli.py context \
   --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --text "come funziona bpofh?" \
@@ -433,7 +441,7 @@ Regola operativa: prima di usare PROJECT_INDEX o grep, eseguire sempre almeno un
 Oppure usa direttamente un file/dir per filtrare:
 
 ```bash
-python llm_context/cli.py context \
+python cli.py context \
   --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --text "come funziona?" \
@@ -511,31 +519,31 @@ Nota: `embedding_dim` deve corrispondere alla dimensione usata per il DB (384).
 
 Ho aggiunto un documento dedicato per l'uso da parte degli agenti:
 
-- `llm_context/AGENT_GUIDE.md`
+- [AGENT_GUIDE.md](/C:/Users/Gianmarco/Urgewalt/Yetzirah/llm_context_rework/AGENT_GUIDE.md)
 
 Contiene:
 - esempio con helper `build_context()`
 - query SQL diretta con psycopg
 - linee guida su filtri e privacy
 
-## Recap comandi (llm_context, v2)
+## Recap comandi (llm_context_rework, v2)
 
 Install:
 
 ```bash
-pip install -e llm_context
+pip install -e .
 ```
 
 Init DB v2:
 
 ```bash
-python llm_context/cli.py init-db-v2 --dsn "postgresql://<user>:<password>@localhost:5432/postgres" --embedding-dim 384
+python cli.py init-db-v2 --dsn "postgresql://<user>:<password>@localhost:5432/postgres" --embedding-dim 384
 ```
 
 Ingest v2 incrementale:
 
 ```bash
-python llm_context/cli.py --verbose ingest --incremental \
+python cli.py --verbose ingest --incremental \
   --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --root ./ \
@@ -545,7 +553,7 @@ python llm_context/cli.py --verbose ingest --incremental \
 Context (per agenti, v2):
 
 ```bash
-python llm_context/cli.py context \
+python cli.py context \
   --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --text "stiamo lavorando su bpofh" \
@@ -556,7 +564,7 @@ python llm_context/cli.py context \
 Query normale (v2):
 
 ```bash
-python llm_context/cli.py query \
+python cli.py query \
   --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --text "come funziona bpofh?" \
