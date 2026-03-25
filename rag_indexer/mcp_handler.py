@@ -390,6 +390,12 @@ class MCPHandler:
             symbol_results=symbol_results,
             path_prefix=resolved_prefix,
         )
+        functional_context["tool_hints"] = _build_tool_hints(
+            query_text=query_text,
+            functional_context=functional_context,
+            results=results,
+            symbol_results=symbol_results,
+        )
         payload = {
             "functional_context": functional_context,
             "context": context,
@@ -441,6 +447,54 @@ class MCPHandler:
                 "inspection": ["rag_search", "symbol_search"],
                 "discovery": ["context_info", "list_projects", "get_project_info"],
             },
+            "tool_roles": {
+                "rag_context": {
+                    "role": "default working tool",
+                    "use_when": [
+                        "devi ottenere velocemente il pacchetto di contesto piu' utile per lavorare sul codice",
+                        "vuoi entry point, file core e contesto assemblato invece dei soli hit raw",
+                    ],
+                    "returns": [
+                        "functional_context",
+                        "entry_points",
+                        "core_files",
+                        "supporting_matches",
+                        "assembled_context",
+                        "tool_hints",
+                    ],
+                },
+                "rag_search": {
+                    "role": "targeted research and deep inspection",
+                    "use_when": [
+                        "vuoi vedere i match raw del retrieval",
+                        "devi approfondire, confermare o debuggare la copertura della query",
+                    ],
+                    "returns": ["results", "meta"],
+                },
+                "symbol_search": {
+                    "role": "precision lookup",
+                    "use_when": [
+                        "devi trovare signature e linee esatte di un simbolo",
+                        "devi disambiguare nomi tecnici emersi da rag_context",
+                    ],
+                    "returns": ["results", "count"],
+                },
+                "map_work_item_to_codebase": {
+                    "role": "functional-to-codebase mapping",
+                    "use_when": [
+                        "parti da ticket, work item o richiesta funzionale",
+                        "vuoi repo_target, area, path e hint implementativo strutturati",
+                    ],
+                    "returns": [
+                        "product_target",
+                        "repo_target",
+                        "area",
+                        "feasibility",
+                        "paths",
+                        "implementation_hint",
+                    ],
+                },
+            },
             "capabilities": [
                 "rag_context: contesto formattato per analisi codice/documenti",
                 "rag_search: risultati raw di retrieval semantico/keyword",
@@ -450,13 +504,33 @@ class MCPHandler:
                 "get_project_info: dettaglio di un progetto registrato",
             ],
             "usage_notes": {
-                "rag_context": "Tool principale per lavorare: restituisce functional context assemblato di default.",
-                "rag_search": "Tool raw/debug: restituisce retrieval grezzo senza assembly.",
+                "rag_context": (
+                    "Tool principale per lavorare: restituisce un package funzionale assemblato di default."
+                ),
+                "rag_search": (
+                    "Tool di approfondimento/raw: restituisce retrieval grezzo senza assembly."
+                ),
                 "map_work_item_to_codebase": (
                     "Tool strutturato per mappare richieste funzionali o ticket verso prodotto/repo/area."
                 ),
-                "symbol_search": "Tool di precisione per lookup simboli; utile per disambiguare nomi tecnici.",
+                "symbol_search": (
+                    "Tool di precisione per lookup simboli; utile per disambiguare nomi tecnici ed entry point."
+                ),
             },
+            "recommended_workflows": [
+                {
+                    "goal": "iniziare a lavorare su una query tecnica",
+                    "steps": ["context_info", "rag_context", "symbol_search (se servono linee/signature esatte)"],
+                },
+                {
+                    "goal": "approfondire o debuggare il retrieval",
+                    "steps": ["rag_context", "rag_search", "symbol_search"],
+                },
+                {
+                    "goal": "partire da ticket o richiesta funzionale",
+                    "steps": ["map_work_item_to_codebase", "rag_context", "symbol_search"],
+                },
+            ],
             "boundaries": [
                 "NON e' un sistema di memoria operativa persistente",
                 "NON sostituisce llm-memory per decisioni/preferenze operative",
@@ -809,12 +883,15 @@ def tool_rag_context() -> dict[str, Any]:
     return {
         "name": "rag_context",
         "description": (
-            "Read-plane MCP tool per recuperare contesto funzionale assemblato da codice/documenti indicizzati. "
-            "Usare solo per context retrieval tecnico; non salva memorie operative e non esegue "
-            "ingest/index refresh. In single-project mode puo' usare il default project se "
-            "configurato in modo sicuro; in multi-project mode richiede project_id esplicito e "
-            "non usa alcun default implicito. Per write_enabled/ingest_enabled, refresh indice e "
-            "operazioni di ingest-plane usare context_info e la CLI operativa."
+            "Tool principale del read-plane MCP: restituisce un pacchetto di contesto funzionale "
+            "assemblato da codice/documenti indicizzati, pensato per aiutare un agente a lavorare "
+            "subito sul codice. Include entry point, core files, supporting matches, contesto "
+            "assemblato e hint sui tool di follow-up. Usare solo per context retrieval tecnico; "
+            "non salva memorie operative e non esegue ingest/index refresh. In single-project mode "
+            "puo' usare il default project se configurato in modo sicuro; in multi-project mode "
+            "richiede project_id esplicito e non usa alcun default implicito. Per "
+            "write_enabled/ingest_enabled, refresh indice e operazioni di ingest-plane usare "
+            "context_info e la CLI operativa."
         ),
         "inputSchema": {
             "type": "object",
@@ -853,9 +930,11 @@ def tool_rag_search() -> dict[str, Any]:
     tool = tool_rag_context()
     tool["name"] = "rag_search"
     tool["description"] = (
-        "Read-plane MCP tool che restituisce match RAG raw su codice/documenti indicizzati "
-        "(senza contesto formattato). Non e' un memory store operativo e non esegue ingest o "
-        "refresh indice. In single-project mode puo' usare un default project solo se "
+        "Tool di approfondimento del read-plane MCP: restituisce match RAG raw su "
+        "codice/documenti indicizzati senza context assembly. Usarlo per ricerca mirata, "
+        "debug del retrieval, conferme puntuali o quando serve vedere i risultati grezzi oltre "
+        "il pacchetto principale di rag_context. Non e' un memory store operativo e non esegue "
+        "ingest o refresh indice. In single-project mode puo' usare un default project solo se "
         "supportato in modo sicuro; in multi-project mode richiede project_id esplicito."
     )
     return tool
@@ -898,7 +977,10 @@ def tool_context_info() -> dict[str, Any]:
     """Return tool schema describing llm-context purpose and boundaries."""
     return {
         "name": "context_info",
-        "description": "Spiega scopo/limiti del MCP llm-context.",
+        "description": (
+            "Tool di discovery del server: espone scopo, limiti, tool disponibili, ruoli "
+            "consigliati e workflow d'uso del MCP llm-context."
+        ),
         "inputSchema": {"type": "object", "properties": {}},
     }
 
@@ -931,7 +1013,9 @@ def tool_symbol_search() -> dict[str, Any]:
         "name": "symbol_search",
         "description": (
             "Cerca simboli (class, function, method, interface, enum, struct, type) per nome "
-            "nel codice indicizzato. E' un tool di read-plane: non aggiorna l'indice e non fa "
+            "nel codice indicizzato. E' il tool di precisione da usare dopo rag_context quando "
+            "serve disambiguare nomi tecnici, trovare signature/linee esatte o confermare "
+            "entry point specifici. E' un tool di read-plane: non aggiorna l'indice e non fa "
             "operazioni di ingest-plane. In multi-project mode richiede project_id esplicito; in "
             "single-project mode puo' usare il default project solo se configurato in modo "
             "sicuro. Restituisce line_start, line_end, signature e path del file."
@@ -1033,6 +1117,7 @@ def format_functional_context_text(payload: dict[str, Any]) -> str:
     entry_points = payload.get("entry_points") or []
     core_files = payload.get("core_files") or []
     supporting_matches = payload.get("supporting_matches") or []
+    tool_hints = payload.get("tool_hints") or {}
     assembled_context = str(payload.get("assembled_context") or "").strip()
 
     lines: list[str] = [
@@ -1072,10 +1157,95 @@ def format_functional_context_text(payload: dict[str, Any]) -> str:
                 f"score={float(item.get('score', 0.0)):.4f}"
             )
         lines.append("")
+    follow_up_tools = tool_hints.get("recommended_follow_up") or []
+    if follow_up_tools:
+        lines.append("FOLLOW-UP TOOLS")
+        for item in follow_up_tools:
+            tool_name = item.get("tool") or "tool"
+            reason = item.get("reason") or ""
+            suggested_names = item.get("suggested_names") or []
+            line = f"- {tool_name}: {reason}".rstrip()
+            if suggested_names:
+                line += f" suggested_names={','.join(str(name) for name in suggested_names)}"
+            lines.append(line)
+        lines.append("")
     if assembled_context:
         lines.append("ASSEMBLED CONTEXT")
         lines.append(assembled_context)
     return "\n".join(lines).strip()
+
+
+def _build_tool_hints(
+    *,
+    query_text: Any,
+    functional_context: dict[str, Any],
+    results: list[dict[str, Any]],
+    symbol_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    entry_points = functional_context.get("entry_points") or []
+    symbol_names: list[str] = []
+    seen_names: set[str] = set()
+    for item in entry_points:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        lower = name.lower()
+        if lower in seen_names:
+            continue
+        seen_names.add(lower)
+        symbol_names.append(name)
+        if len(symbol_names) >= 4:
+            break
+
+    if not symbol_names:
+        for item in symbol_results:
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            lower = name.lower()
+            if lower in seen_names:
+                continue
+            seen_names.add(lower)
+            symbol_names.append(name)
+            if len(symbol_names) >= 4:
+                break
+
+    query_candidates = [
+        candidate
+        for candidate in _derive_symbol_candidates(query_text, limit=4)
+        if candidate.lower() not in seen_names
+    ]
+
+    symbol_reason = (
+        "Usa symbol_search per confermare signature, linee esatte ed entry point rilevanti."
+        if symbol_names or symbol_results
+        else "Usa symbol_search se devi disambiguare nomi tecnici o verificare un simbolo preciso."
+    )
+    raw_reason = (
+        "Usa rag_search per vedere i match raw, approfondire varianti della query o investigare "
+        "oltre il pacchetto principale."
+        if results
+        else "Usa rag_search con query piu' larghe quando rag_context non restituisce abbastanza segnali."
+    )
+
+    return {
+        "primary_tool": "rag_context",
+        "recommended_follow_up": [
+            {
+                "tool": "symbol_search",
+                "reason": symbol_reason,
+                "suggested_names": symbol_names or query_candidates,
+            },
+            {
+                "tool": "rag_search",
+                "reason": raw_reason,
+            },
+            {
+                "tool": "context_info",
+                "reason": "Usa context_info per rileggere ruoli, limiti e workflow consigliati dei tool MCP.",
+            },
+        ],
+    }
 
 
 def _derive_symbol_candidates(query_text: Any, *, limit: int = 4) -> list[str]:
