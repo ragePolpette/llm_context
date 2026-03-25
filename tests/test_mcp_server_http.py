@@ -212,3 +212,15 @@ def test_build_health_payload_uses_handler_operational_status():
     payload = mcp_server_http._build_health_payload(FakeHandler())
 
     assert payload == {"status": "ready", "project_count": 2}
+
+
+def test_resolve_runtime_config_path_reads_env(monkeypatch):
+    monkeypatch.setenv("LLM_CONTEXT_CONFIG_PATH", "config.rework.yaml")
+
+    assert mcp_server_http._resolve_runtime_config_path() == "config.rework.yaml"
+
+
+def test_resolve_runtime_config_path_returns_none_when_not_set(monkeypatch):
+    monkeypatch.delenv("LLM_CONTEXT_CONFIG_PATH", raising=False)
+
+    assert mcp_server_http._resolve_runtime_config_path() is None

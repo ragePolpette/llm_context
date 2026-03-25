@@ -270,6 +270,18 @@ pip install -e .
 
 File principale: `config.yaml`.
 
+Profilo runtime dedicato del rework:
+
+- `config.rework.yaml`: profilo separato del rework, basato su `config.yaml`
+- `projects.rework.yaml`: registry locale del rework
+- `.env.rework`: env file locale del runtime rework, da creare partendo da `config.local.example.rework.env`
+
+Questo profilo esiste per allineare `llm_context_rework` agli altri MCP del workspace:
+
+- runtime Python normale
+- config/env/porta separati dal live
+- nessuna condivisione del runtime con `llm_context` attuale
+
 Per mantenere i modelli locali dentro il progetto, usa cache locale:
 
 ```bash
@@ -367,10 +379,27 @@ keyword_weight: 0.3
 
 Attenzione: questo cancella tutto l'indice esistente.
 
+Il DB puo' essere locale o interno; Docker non e' richiesto per il servizio.
+Se usi un PostgreSQL installato localmente o remoto via DSN, esegui i comandi equivalenti con `psql`.
+
 ```bash
 docker exec -it pgvector psql -U postgres -d postgres -c "DROP TABLE IF EXISTS chunk_embeddings; DROP TABLE IF EXISTS chunks; DROP TABLE IF EXISTS documents;"
 python cli.py init-db-v2 --dsn "postgresql://<user>:<password>@localhost:5432/postgres" --embedding-dim 384
 ```
+
+## Avvio del runtime rework
+
+Per avviare il rework come servizio separato:
+
+1. copia `config.local.example.rework.env` in `.env.rework`
+2. imposta il `LLM_CONTEXT_DSN` dedicato del rework
+3. avvia `scripts/start_http_server_rework.bat`
+
+Lo script usa:
+
+- `config.rework.yaml`
+- `projects.rework.yaml`
+- porta dedicata via `.env.rework` (default consigliato: `8766`)
 
 ## Ingest v2 incrementale (locale, senza invio dati)
 

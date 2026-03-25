@@ -90,19 +90,46 @@ def load_config(path: Optional[str]) -> AppConfig:
         config = AppConfig()
         _apply_env_overrides(config)
         return config
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Config not found: {path}")
-    with open(path, "r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
+    resolved_path = Path(path).resolve()
+    data = _load_config_payload(resolved_path, seen_paths=set())
     config = AppConfig()
     for field in fields(config):
         if field.name in data:
             setattr(config, field.name, _coerce_value(data[field.name], field.type))
-    config_dir = Path(path).resolve().parent
+    config_dir = resolved_path.parent
     config.projects_registry_path = _resolve_path(config.projects_registry_path, config_dir)
     config.projects_state_path = _resolve_path(config.projects_state_path, config_dir)
     _apply_env_overrides(config)
     return config
+
+
+def _load_config_payload(path: Path, *, seen_paths: set[Path]) -> dict[str, Any]:
+    resolved_path = path.resolve()
+    if resolved_path in seen_paths:
+        raise ValueError(f"Config extends cycle detected for: {resolved_path}")
+    if not resolved_path.exists():
+        raise FileNotFoundError(f"Config not found: {resolved_path}")
+
+    with resolved_path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Config root must be an object: {resolved_path}")
+
+    extends_value = data.get("extends")
+    current_seen = set(seen_paths)
+    current_seen.add(resolved_path)
+    merged: dict[str, Any] = {}
+    if extends_value is not None:
+        extends_path = Path(str(extends_value)).expanduser()
+        if not extends_path.is_absolute():
+            extends_path = (resolved_path.parent / extends_path).resolve()
+        merged.update(_load_config_payload(extends_path, seen_paths=current_seen))
+
+    for key, value in data.items():
+        if key == "extends":
+            continue
+        merged[key] = value
+    return merged
 
 
 def _coerce_value(value: Any, target_type: Any) -> Any:

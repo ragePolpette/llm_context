@@ -40,6 +40,10 @@ def load_dotenv() -> None:
         return
     loader = getattr(dotenv, "load_dotenv", None)
     if callable(loader):
+        dotenv_path = str(os.getenv("LLM_CONTEXT_DOTENV_PATH", "")).strip()
+        if dotenv_path:
+            loader(dotenv_path=dotenv_path)
+            return
         loader()
 
 
