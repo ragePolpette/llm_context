@@ -27,6 +27,48 @@ def test_load_config_resolves_registry_and_state_paths(tmp_path):
     assert config.projects_state_path == (tmp_path / "runtime" / "projects.state.json").resolve()
 
 
+def test_load_config_supports_extends(tmp_path):
+    base_path = tmp_path / "base.yaml"
+    base_path.write_text(
+        yaml.safe_dump(
+            {
+                "multi_project_enabled": False,
+                "include_dirs": ["src"],
+                "projects_registry_path": "projects.base.yaml",
+            }
+        ),
+        encoding="utf-8",
+    )
+    child_path = tmp_path / "child.yaml"
+    child_path.write_text(
+        yaml.safe_dump(
+            {
+                "extends": "base.yaml",
+                "multi_project_enabled": True,
+                "projects_state_path": "runtime/projects.state.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(str(child_path))
+
+    assert config.multi_project_enabled is True
+    assert config.include_dirs == ["src"]
+    assert config.projects_registry_path == (tmp_path / "projects.base.yaml").resolve()
+    assert config.projects_state_path == (tmp_path / "runtime" / "projects.state.json").resolve()
+
+
+def test_load_config_rejects_extends_cycle(tmp_path):
+    first = tmp_path / "first.yaml"
+    second = tmp_path / "second.yaml"
+    first.write_text(yaml.safe_dump({"extends": "second.yaml"}), encoding="utf-8")
+    second.write_text(yaml.safe_dump({"extends": "first.yaml"}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="extends cycle"):
+        load_config(str(first))
+
+
 def test_project_registry_loads_projects_and_runtime_state(tmp_path):
     registry_path = tmp_path / "projects.yaml"
     state_path = tmp_path / "projects.state.json"
