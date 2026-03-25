@@ -482,6 +482,11 @@ def _build_health_payload(handler: MCPHandler) -> dict[str, Any]:
     return handler.get_operational_status(ready=handler._ready.is_set())
 
 
+def _resolve_runtime_config_path() -> Optional[str]:
+    value = str(os.getenv("LLM_CONTEXT_CONFIG_PATH", "")).strip()
+    return value or None
+
+
 def _coerce_rpc_message(body: Any) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise ValueError("/rpc expects a JSON object body")
@@ -857,7 +862,13 @@ def main():
         _release_instance_lock()
         sys.exit(1)
 
-    handler = MCPHandler()
+    config_path = _resolve_runtime_config_path()
+    if config_path:
+        log.info("Using runtime config: %s", config_path)
+    else:
+        log.info("Using default runtime config: config.yaml")
+
+    handler = MCPHandler(config_path=config_path)
 
     # Wait for warmup before accepting connections
     log.info("Waiting for embedder to load...")

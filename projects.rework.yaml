@@ -1,0 +1,21 @@
+projects:
+  - project_id: llm_context_rework
+    display_name: LLM Context Rework
+    root_path: .
+    include_profile: rework-local
+    retrieval_profile: rework-local
+    include_dirs:
+      - rag_indexer
+      - tests
+      - docs
+      - cli.py
+      - mcp_server.py
+      - mcp_server_http.py
+      - README.md
+      - AGENT_GUIDE.md
+    exclude_globs:
+      - "*.env*"
+      - ".local/**"
+      - "mcp_server.err.log"
+    ingest_enabled: false
+    write_enabled: false
