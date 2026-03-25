@@ -15,6 +15,15 @@ Nota operativa:
 - Docker non e' richiesto per il servizio
 - se il database e' in Docker e' una scelta di provisioning del DB, non del MCP
 
+## Surface MCP consigliato
+
+Ordine d'uso raccomandato:
+
+- `context_info`: capire ruoli, limiti e workflow dei tool disponibili
+- `rag_context`: ottenere il package principale per iniziare a lavorare
+- `symbol_search`: disambiguare simboli, signature e linee esatte
+- `rag_search`: approfondire risultati raw o fare ricerca mirata
+
 ## Opzione A (consigliata): helper Python
 
 Usa l'helper `rag_indexer/agent_context.py` che incapsula retrieval + formattazione contesto.
@@ -58,7 +67,7 @@ Se l'agente esegue comandi di sistema, puo' usare il comando `context` per otten
 direttamente il testo da inserire nel prompt:
 
 ```bash
-python llm_context/cli.py context \
+python cli.py context \
   --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --text "come funziona bpofh?" \
@@ -74,7 +83,7 @@ il tool lo rileva e filtra automaticamente.
 Oppure usa direttamente un file/dir:
 
 ```bash
-python llm_context/cli.py context \
+python cli.py context \
   --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
   --project-id myproj \
   --text "spiegami il flusso" \
@@ -86,7 +95,7 @@ python llm_context/cli.py context \
 Il comando stampa solo il contesto. Se vuoi anche i risultati raw:
 
 ```bash
-python llm_context/cli.py context --print-results ...
+python cli.py context --print-results ...
 ```
 
 ## Opzione B: query diretta al DB (psycopg, schema v2)
