@@ -7,6 +7,7 @@ Simple stdio wrapper around the MCPHandler.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -25,6 +26,11 @@ except Exception:
     pass
 
 from rag_indexer.mcp_handler import MCPHandler
+
+
+def _resolve_runtime_config_path() -> Optional[str]:
+    value = str(os.getenv("LLM_CONTEXT_CONFIG_PATH", "")).strip()
+    return value or None
 
 
 def _read_headers() -> dict[str, str]:
@@ -68,7 +74,8 @@ def _send_message(message: dict[str, Any]) -> None:
 
 def main() -> None:
     """Main stdio loop."""
-    handler = MCPHandler()
+    config_path = _resolve_runtime_config_path()
+    handler = MCPHandler(config_path=config_path)
     sys.stderr.write("[INFO] MCP Server (stdio) started. Waiting for messages...\n")
     while True:
         message = _read_message()

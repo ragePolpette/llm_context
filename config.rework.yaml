@@ -1,0 +1,8 @@
+extends: config.yaml
+
+multi_project_enabled: true
+default_project_id: llm_context_rework
+projects_registry_path: projects.rework.yaml
+projects_state_path: .local/runtime/projects.state.rework.json
+ingest_enabled: false
+write_enabled: false
