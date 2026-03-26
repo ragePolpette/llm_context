@@ -274,7 +274,7 @@ Profilo runtime dedicato del rework:
 
 - `config.rework.yaml`: profilo separato del rework, basato su `config.yaml`
 - `projects.rework.yaml`: registry locale del rework
-- `.env.rework`: env file locale del runtime rework, da creare partendo da `config.local.example.rework.env`
+- nessun file `.env`: il runtime rework legge solo variabili gia' presenti nel processo
 
 Questo profilo esiste per allineare `llm_context_rework` agli altri MCP del workspace:
 
@@ -392,15 +392,24 @@ python cli.py init-db-v2 --dsn "postgresql://<user>:<password>@localhost:5432/po
 
 Per avviare il rework come servizio separato:
 
-1. copia `config.local.example.rework.env` in `.env.rework`
-2. imposta il `LLM_CONTEXT_DSN` dedicato del rework, preferibilmente su un database separato come `llm_context_rework`
+1. imposta il `LLM_CONTEXT_DSN` dedicato del rework nel PowerShell di lancio oppure dalla dashboard MCP in `C:\Users\Gianmarco\Urgewalt\Yetzirah\mcp-dashboard`
+2. opzionalmente imposta `MCP_PORT` e `LLM_CONTEXT_RUNTIME_NAME`
 3. avvia `scripts/start_http_server_rework.bat`
+
+Esempio PowerShell:
+
+```powershell
+$env:LLM_CONTEXT_DSN = "postgresql://<user>:<password>@localhost:5432/llm_context_rework"
+$env:MCP_PORT = "8766"
+$env:LLM_CONTEXT_RUNTIME_NAME = "rework"
+.\scripts\start_http_server_rework.bat
+```
 
 Lo script usa:
 
 - `config.rework.yaml`
 - `projects.rework.yaml`
-- porta dedicata via `.env.rework` (default consigliato: `8766`)
+- porta dedicata via variabile `MCP_PORT` (default consigliato: `8766`)
 
 Script operativi del runtime rework:
 
@@ -413,7 +422,7 @@ Script operativi del runtime rework:
 
 ## Smoke test del runtime rework
 
-Dopo aver configurato `.env.rework`, puoi verificare il server HTTP del rework con:
+Dopo aver impostato il `LLM_CONTEXT_DSN` nel processo, puoi verificare il server HTTP del rework con:
 
 ```bash
 scripts\smoke_test_rework_http.bat

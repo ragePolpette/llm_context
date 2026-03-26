@@ -3,15 +3,9 @@ REM Esegue ingest sul progetto dedicato del rework.
 
 cd /d "%~dp0\.."
 
-if not exist ".env.rework" (
-  echo [ERRORE] Manca .env.rework. Crea il file dal template prima dell'ingest.
-  exit /b 1
-)
-
-for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "$envFile = Join-Path (Get-Location) '.env.rework'; Get-Content $envFile | Where-Object { $_ -match '^LLM_CONTEXT_DSN=' } | Select-Object -First 1 | ForEach-Object { ($_ -split '=',2)[1] }"`) do set LLM_CONTEXT_DSN=%%i
-
 if "%LLM_CONTEXT_DSN%"=="" (
-  echo [ERRORE] LLM_CONTEXT_DSN non trovato in .env.rework.
+  echo [ERRORE] LLM_CONTEXT_DSN non impostato.
+  echo [INFO] Passa il DSN al processo dal PowerShell di lancio oppure dalla dashboard MCP.
   exit /b 1
 )
 

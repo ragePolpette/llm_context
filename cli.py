@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import logging
 import os
@@ -36,23 +35,7 @@ from rag_indexer.path_utils import (
     parse_bool,
 )
 
-
-def _load_dotenv() -> None:
-    try:
-        dotenv = importlib.import_module("dotenv")
-    except ImportError:
-        return
-    loader = getattr(dotenv, "load_dotenv", None)
-    if callable(loader):
-        dotenv_path = str(os.getenv("LLM_CONTEXT_DOTENV_PATH", "")).strip()
-        if dotenv_path:
-            loader(dotenv_path=dotenv_path)
-            return
-        loader()
-
-
 def main() -> None:
-    _load_dotenv()
     parser = argparse.ArgumentParser(description="RAG Memory Indexer")
     parser.add_argument("--config", default=None)
     parser.add_argument("--verbose", action="store_true")
