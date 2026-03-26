@@ -39,3 +39,9 @@ Regole locali per il modulo `llm_context` (RAG + MCP server).
 
 - Nessuna dipendenza dal workflow "Codex Sub-Agent Playbook" root.
 - Decisioni locali di `llm_context` non cambiano le regole globali del workspace DEV e del target multi-repo.
+
+## Dependency Policy
+
+- Se modifichi `pyproject.toml` o `requirements*.txt`, esegui `node C:\Users\Gianmarco\Urgewalt\dependency-policy\dependency-policy-check.mjs --repo . --mode auto` prima di chiudere il task.
+- Se il check fallisce, il task non va considerato concluso senza eccezione approvata in `C:\Users\Gianmarco\Urgewalt\SECURITY_EXCEPTIONS.md`.
+- Se non tocchi manifest o lockfile dipendenze, questo check non è obbligatorio.
