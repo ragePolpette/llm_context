@@ -65,6 +65,7 @@ class MCPHandler:
         self._configure_local_model_dirs()
         if config_path is None:
             config_path = str(self._project_root / "config.yaml")
+        self._config_path = str(Path(config_path).resolve())
         self._config = load_config(config_path)
         self._project_registry = load_project_registry(
             self._config.projects_registry_path,
@@ -89,6 +90,9 @@ class MCPHandler:
         self._default_embedding_dim = int(
             os.getenv("LLM_CONTEXT_EMBEDDING_DIM", str(self._config.embedding_dim))
         )
+        self._runtime_name = str(
+            os.getenv("LLM_CONTEXT_RUNTIME_NAME", "default")
+        ).strip() or "default"
         self._max_query_embedding_items = int(
             os.getenv("LLM_CONTEXT_MAX_QUERY_EMBEDDING_ITEMS", "4096")
         )
@@ -440,6 +444,8 @@ class MCPHandler:
         """Describe scope and boundaries of llm-context MCP."""
         return {
             "server": "llm-context-mcp",
+            "runtime_name": self._runtime_name,
+            "config_path": self._config_path,
             "purpose": "Recupero contesto da codice/documenti indicizzati (RAG).",
             "multi_project_enabled": self._config.multi_project_enabled,
             "write_enabled": self._config.write_enabled,
@@ -672,6 +678,8 @@ class MCPHandler:
             )
         return {
             "status": "ready" if ready else "loading",
+            "runtime_name": self._runtime_name,
+            "config_path": self._config_path,
             "multi_project_enabled": self._config.multi_project_enabled,
             "ingest_enabled": self._config.ingest_enabled,
             "write_enabled": self._config.write_enabled,
