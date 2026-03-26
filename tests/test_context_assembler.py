@@ -59,12 +59,15 @@ def test_assemble_functional_context_groups_matches_by_file_and_attaches_symbols
     assert payload["query"]["terms"] == ["genera", "fattura"]
     assert payload["core_files"][0]["source_path"] == "pubblico/api/Controllers/Fattura.cs"
     assert payload["core_files"][0]["match_count"] == 2
+    assert payload["core_files"][0]["functional_role"] == "entry_point"
     assert payload["core_files"][0]["symbol_hits"][0]["name"] == "GeneraFattura"
     assert payload["core_files"][0]["query_overlap_terms"] == ["fattura"]
     assert "query_overlap=" in payload["core_files"][0]["selection_reason"]
+    assert payload["summary"]["role_counts"]["entry_point"] == 1
     assert payload["entry_points"][0]["name"] == "GeneraFattura"
     assert payload["summary"]["query_term_count"] == 2
     assert "FILE pubblico/api/Controllers/Fattura.cs" in payload["assembled_context"]
+    assert "functional_role=entry_point" in payload["assembled_context"]
     assert "selection_reason=" in payload["assembled_context"]
 
 
@@ -179,6 +182,7 @@ def test_assemble_functional_context_prefers_files_with_query_overlap_and_symbol
     assert payload["core_files"][0]["source_path"] == "pubblico/api/Controllers/Fattura.cs"
     assert payload["entry_points"][0]["source_path"] == "pubblico/api/Controllers/Fattura.cs"
     assert payload["core_files"][0]["evidence_kinds"] == ["retrieval", "symbol", "query_overlap"]
+    assert payload["core_files"][0]["functional_role"] == "entry_point"
 
 
 def test_assemble_functional_context_prioritizes_entry_points_from_core_files():
@@ -220,3 +224,78 @@ def test_assemble_functional_context_prioritizes_entry_points_from_core_files():
     )
 
     assert payload["entry_points"][0]["name"] == "GeneraFattura"
+
+
+def test_assemble_functional_context_assigns_functional_roles_for_multi_file_flow():
+    retrieval_results = [
+        {
+            "source_path": "pubblico/api/Controllers/Fattura.cs",
+            "score": 0.89,
+            "text_hash": "controller-hit",
+            "line_start": 10,
+            "line_end": 30,
+            "chunk_index": 0,
+            "snippet": "Endpoint di generazione fattura.",
+            "text": "public class FatturaController { ... }",
+        },
+        {
+            "source_path": "librerie/BpoFH/FatturazioneService.cs",
+            "score": 0.87,
+            "text_hash": "service-hit",
+            "line_start": 50,
+            "line_end": 90,
+            "chunk_index": 0,
+            "snippet": "Servizio che esegue GeneraFattura e calcolo piani.",
+            "text": "public class FatturazioneService { ... }",
+        },
+        {
+            "source_path": "pubblico/api/IFatture.cs",
+            "score": 0.78,
+            "text_hash": "contract-hit",
+            "line_start": 1,
+            "line_end": 20,
+            "chunk_index": 0,
+            "snippet": "Contratto IFatture dell'API.",
+            "text": "public interface IFatture { ... }",
+        },
+    ]
+    symbol_results = [
+        {
+            "source_path": "pubblico/api/Controllers/Fattura.cs",
+            "name": "GeneraFattura",
+            "kind": "method",
+            "signature": "public void GeneraFattura()",
+            "line_start": 44,
+            "line_end": 60,
+        },
+        {
+            "source_path": "librerie/BpoFH/FatturazioneService.cs",
+            "name": "FatturazioneService",
+            "kind": "class",
+            "signature": "public class FatturazioneService",
+            "line_start": 1,
+            "line_end": 120,
+        },
+        {
+            "source_path": "pubblico/api/IFatture.cs",
+            "name": "IFatture",
+            "kind": "interface",
+            "signature": "public interface IFatture",
+            "line_start": 1,
+            "line_end": 40,
+        },
+    ]
+
+    payload = assemble_functional_context(
+        query_text="GeneraFattura fattura api",
+        retrieval_results=retrieval_results,
+        symbol_results=symbol_results,
+    )
+
+    roles = {item["source_path"]: item["functional_role"] for item in payload["core_files"]}
+    assert roles["pubblico/api/Controllers/Fattura.cs"] == "entry_point"
+    assert roles["librerie/BpoFH/FatturazioneService.cs"] == "implementation"
+    assert roles["pubblico/api/IFatture.cs"] == "contract"
+    assert payload["summary"]["role_counts"]["entry_point"] == 1
+    assert payload["summary"]["role_counts"]["implementation"] == 1
+    assert payload["summary"]["role_counts"]["contract"] == 1
