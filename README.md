@@ -69,7 +69,7 @@ Il piano MCP standard resta di sola retrieval:
 Ruoli operativi consigliati:
 
 - `rag_context`: tool principale per lavorare sul codice; restituisce un package funzionale assemblato
-- `rag_search`: tool di approfondimento/raw per ricerca mirata, debug e conferme
+- `rag_search`: tool di approfondimento/raw per ricerca mirata, debug e conferme, con gruppi per file e hint di investigazione
 - `symbol_search`: tool di precisione per signature, linee esatte e disambiguazione simboli
 - `context_info`: discovery del server, ruoli tool, limiti e workflow consigliati
 - `map_work_item_to_codebase`: mapping strutturato richiesta funzionale -> area/repo/path
