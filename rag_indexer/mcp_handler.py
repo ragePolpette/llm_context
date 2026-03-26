@@ -1196,6 +1196,24 @@ def format_functional_context_text(payload: dict[str, Any]) -> str:
                 f"score={float(item.get('score', 0.0)):.4f}"
             )
         lines.append("")
+    symbol_follow_up = tool_hints.get("symbol_follow_up") or {}
+    suggested_queries = symbol_follow_up.get("suggested_queries") or []
+    if suggested_queries:
+        lines.append("SYMBOL FOLLOW-UP")
+        for item in suggested_queries[:5]:
+            name = item.get("name") or "(unknown)"
+            kind = item.get("kind") or "symbol"
+            role = item.get("source_role") or "supporting"
+            source_path = item.get("source_path") or ""
+            exact = bool(item.get("exact", False))
+            reason = item.get("reason") or ""
+            line = f"- {kind} {name} exact={str(exact).lower()} role={role}"
+            if source_path:
+                line += f" path={source_path}"
+            if reason:
+                line += f" reason={reason}"
+            lines.append(line)
+        lines.append("")
     follow_up_tools = tool_hints.get("recommended_follow_up") or []
     if follow_up_tools:
         lines.append("FOLLOW-UP TOOLS")
@@ -1221,43 +1239,17 @@ def _build_tool_hints(
     results: list[dict[str, Any]],
     symbol_results: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    entry_points = functional_context.get("entry_points") or []
-    symbol_names: list[str] = []
-    seen_names: set[str] = set()
-    for item in entry_points:
-        name = str(item.get("name") or "").strip()
-        if not name:
-            continue
-        lower = name.lower()
-        if lower in seen_names:
-            continue
-        seen_names.add(lower)
-        symbol_names.append(name)
-        if len(symbol_names) >= 4:
-            break
-
-    if not symbol_names:
-        for item in symbol_results:
-            name = str(item.get("name") or "").strip()
-            if not name:
-                continue
-            lower = name.lower()
-            if lower in seen_names:
-                continue
-            seen_names.add(lower)
-            symbol_names.append(name)
-            if len(symbol_names) >= 4:
-                break
-
-    query_candidates = [
-        candidate
-        for candidate in _derive_symbol_candidates(query_text, limit=4)
-        if candidate.lower() not in seen_names
-    ]
+    symbol_follow_up = _build_symbol_follow_up(
+        query_text=query_text,
+        functional_context=functional_context,
+        symbol_results=symbol_results,
+    )
+    suggested_queries = symbol_follow_up.get("suggested_queries") or []
+    suggested_names = symbol_follow_up.get("suggested_names") or []
 
     symbol_reason = (
         "Usa symbol_search per confermare signature, linee esatte ed entry point rilevanti."
-        if symbol_names or symbol_results
+        if suggested_queries or symbol_results
         else "Usa symbol_search se devi disambiguare nomi tecnici o verificare un simbolo preciso."
     )
     raw_reason = (
@@ -1269,11 +1261,14 @@ def _build_tool_hints(
 
     return {
         "primary_tool": "rag_context",
+        "symbol_follow_up": symbol_follow_up,
         "recommended_follow_up": [
             {
                 "tool": "symbol_search",
                 "reason": symbol_reason,
-                "suggested_names": symbol_names or query_candidates,
+                "suggested_names": suggested_names,
+                "suggested_queries": suggested_queries,
+                "focus_paths": symbol_follow_up.get("focus_paths") or [],
             },
             {
                 "tool": "rag_search",
@@ -1285,6 +1280,118 @@ def _build_tool_hints(
             },
         ],
     }
+
+
+def _build_symbol_follow_up(
+    *,
+    query_text: Any,
+    functional_context: dict[str, Any],
+    symbol_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    core_files = functional_context.get("core_files") or []
+    suggested_queries: list[dict[str, Any]] = []
+    suggested_names: list[str] = []
+    focus_paths: list[str] = []
+    seen_names: set[str] = set()
+
+    for core_file in core_files:
+        source_path = str(core_file.get("source_path") or "").strip()
+        role = str(core_file.get("functional_role") or "supporting").strip() or "supporting"
+        if source_path and source_path not in focus_paths:
+            focus_paths.append(source_path)
+        for symbol in core_file.get("symbol_hits") or []:
+            name = str(symbol.get("name") or "").strip()
+            if not name:
+                continue
+            lower = name.lower()
+            if lower in seen_names:
+                continue
+            seen_names.add(lower)
+            suggested_names.append(name)
+            suggested_queries.append(
+                {
+                    "name": name,
+                    "kind": str(symbol.get("kind") or "").strip() or None,
+                    "exact": True,
+                    "source_path": source_path or str(symbol.get("source_path") or "").strip() or None,
+                    "source_role": role,
+                    "reason": _symbol_follow_up_reason(role=role, kind=symbol.get("kind")),
+                }
+            )
+            if len(suggested_queries) >= 6:
+                break
+        if len(suggested_queries) >= 6:
+            break
+
+    if not suggested_queries:
+        for symbol in symbol_results:
+            name = str(symbol.get("name") or "").strip()
+            if not name:
+                continue
+            lower = name.lower()
+            if lower in seen_names:
+                continue
+            seen_names.add(lower)
+            source_path = str(symbol.get("source_path") or "").strip()
+            if source_path and source_path not in focus_paths:
+                focus_paths.append(source_path)
+            suggested_names.append(name)
+            suggested_queries.append(
+                {
+                    "name": name,
+                    "kind": str(symbol.get("kind") or "").strip() or None,
+                    "exact": True,
+                    "source_path": source_path or None,
+                    "source_role": "supporting",
+                    "reason": _symbol_follow_up_reason(role="supporting", kind=symbol.get("kind")),
+                }
+            )
+            if len(suggested_queries) >= 6:
+                break
+
+    query_candidates: list[str] = []
+    for candidate in _derive_symbol_candidates(query_text, limit=4):
+        lower = candidate.lower()
+        if lower in seen_names:
+            continue
+        seen_names.add(lower)
+        query_candidates.append(candidate)
+
+    if not suggested_queries:
+        for candidate in query_candidates:
+            suggested_names.append(candidate)
+            suggested_queries.append(
+                {
+                    "name": candidate,
+                    "kind": None,
+                    "exact": False,
+                    "source_path": None,
+                    "source_role": "query_candidate",
+                    "reason": "Nome tecnico derivato dalla query iniziale.",
+                }
+            )
+
+    return {
+        "recommended": bool(suggested_queries),
+        "suggested_names": suggested_names[:6],
+        "suggested_queries": suggested_queries[:6],
+        "focus_paths": focus_paths[:4],
+        "query_candidates": query_candidates[:4],
+    }
+
+
+def _symbol_follow_up_reason(*, role: str, kind: Any) -> str:
+    normalized_role = str(role or "supporting").strip().lower()
+    normalized_kind = str(kind or "").strip().lower()
+    if normalized_role == "entry_point":
+        return "Conferma il simbolo di ingresso e le linee esatte della surface applicativa."
+    if normalized_role == "implementation":
+        return "Apri il simbolo di implementazione principale collegato al flusso."
+    if normalized_role == "contract":
+        return "Verifica il contratto o l'interfaccia usata nel flusso."
+    if normalized_kind in {"method", "function"}:
+        return "Disambigua il punto eseguibile rilevante emerso dal contesto."
+    return "Verifica il simbolo tecnico piu' rilevante emerso dal contesto."
 
 
 def _derive_symbol_candidates(query_text: Any, *, limit: int = 4) -> list[str]:
@@ -1316,6 +1423,27 @@ def _derive_symbol_candidates(query_text: Any, *, limit: int = 4) -> list[str]:
 
 def _looks_like_symbol(token: str) -> bool:
     if len(token) < 3:
+        return False
+    if token.strip().lower() in {
+        "apri",
+        "open",
+        "show",
+        "mostra",
+        "trova",
+        "find",
+        "cerca",
+        "usa",
+        "call",
+        "chiama",
+        "metodo",
+        "method",
+        "classe",
+        "class",
+        "interfaccia",
+        "interface",
+        "servizio",
+        "service",
+    }:
         return False
     if "_" in token:
         return True
