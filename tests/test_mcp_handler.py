@@ -151,6 +151,8 @@ def test_context_info_exposes_tool_map_and_usage_notes(no_warmup):
 
     assert payload["runtime_name"] == "default"
     assert payload["config_path"].endswith("config.yaml")
+    assert payload["storage_target"]["database"] == "postgres"
+    assert payload["storage_target"]["dedicated_candidate"] is False
     assert "tool_map" in payload
     assert "tool_roles" in payload
     assert "recommended_workflows" in payload
@@ -586,6 +588,22 @@ def test_context_operational_status_exposes_project_summary(monkeypatch, no_warm
 
     assert payload["status"] == "ready"
     assert payload["runtime_name"] == "default"
+    assert payload["storage_target"]["database"] == "postgres"
     assert payload["multi_project_enabled"] is True
     assert payload["project_count"] == 2
     assert payload["projects"][0]["project_id"] == "alpha"
+
+
+def test_storage_target_summary_marks_dedicated_database(monkeypatch, no_warmup):
+    monkeypatch.setenv(
+        "LLM_CONTEXT_DSN",
+        "postgresql://ctx_user:ctx_pass@localhost:5432/llm_context_rework",
+    )
+    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "rework-local-pg")
+
+    handler = MCPHandler()
+    payload = handler.get_operational_status(ready=True)
+
+    assert payload["storage_target"]["name"] == "rework-local-pg"
+    assert payload["storage_target"]["database"] == "llm_context_rework"
+    assert payload["storage_target"]["dedicated_candidate"] is True

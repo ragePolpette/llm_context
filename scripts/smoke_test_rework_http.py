@@ -98,6 +98,11 @@ def main() -> int:
         health = _wait_for_health(base_url, timeout_sec=args.timeout_sec)
         if health.get("runtime_name") != env["LLM_CONTEXT_RUNTIME_NAME"]:
             raise RuntimeError(f"Unexpected runtime_name in health payload: {health}")
+        storage_target = health.get("storage_target") or {}
+        if not storage_target.get("database"):
+            raise RuntimeError(f"Health payload does not expose storage_target.database: {health}")
+        if storage_target.get("dedicated_candidate") is False:
+            raise RuntimeError(f"Storage target does not look dedicated: {storage_target}")
 
         tools_list = _http_json(
             f"{base_url}/rpc",
@@ -160,7 +165,17 @@ def main() -> int:
                 arguments={"project_id": project_id, "name": "MCPHandler"},
             )
 
-        print(json.dumps({"status": "ok", "base_url": base_url, "project_id": project_id}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "base_url": base_url,
+                    "project_id": project_id,
+                    "storage_target": storage_target,
+                },
+                indent=2,
+            )
+        )
         return 0
     finally:
         process.terminate()
