@@ -4,6 +4,7 @@ import yaml
 from rag_indexer import mcp_handler as mcp_handler_module
 from rag_indexer.mcp_handler import (
     MCPHandler,
+    format_functional_context_text,
     format_tool_text,
     tool_map_work_item_to_codebase,
     tool_rag_context,
@@ -109,6 +110,116 @@ def test_rag_context_does_not_retry_when_path_prefix_is_explicit(monkeypatch, no
     assert payload["meta"]["auto_scope_fallback_used"] is False
 
 
+def test_rag_context_builds_symbol_follow_up_from_core_file_roles(monkeypatch, no_warmup):
+    retrieval_results = [
+        {
+            "source_path": "pubblico/api/Controllers/Fattura.cs",
+            "score": 0.92,
+            "text_hash": "controller-hit",
+            "line_start": 10,
+            "line_end": 30,
+            "chunk_index": 0,
+            "section_path": "",
+            "snippet": "Endpoint di generazione fattura.",
+            "text": "public class FatturaController { ... }",
+        },
+        {
+            "source_path": "librerie/BpoFH/FatturazioneService.cs",
+            "score": 0.88,
+            "text_hash": "service-hit",
+            "line_start": 50,
+            "line_end": 90,
+            "chunk_index": 0,
+            "section_path": "",
+            "snippet": "Servizio che esegue GeneraFattura.",
+            "text": "public class FatturazioneService { ... }",
+        },
+        {
+            "source_path": "pubblico/api/IFatture.cs",
+            "score": 0.81,
+            "text_hash": "contract-hit",
+            "line_start": 1,
+            "line_end": 20,
+            "chunk_index": 0,
+            "section_path": "",
+            "snippet": "Contratto IFatture dell'API.",
+            "text": "public interface IFatture { ... }",
+        },
+    ]
+    symbol_results = [
+        {
+            "source_path": "pubblico/api/Controllers/Fattura.cs",
+            "name": "GeneraFattura",
+            "kind": "method",
+            "signature": "public void GeneraFattura()",
+            "line_start": 44,
+            "line_end": 60,
+        },
+        {
+            "source_path": "librerie/BpoFH/FatturazioneService.cs",
+            "name": "FatturazioneService",
+            "kind": "class",
+            "signature": "public class FatturazioneService",
+            "line_start": 1,
+            "line_end": 120,
+        },
+        {
+            "source_path": "pubblico/api/IFatture.cs",
+            "name": "IFatture",
+            "kind": "interface",
+            "signature": "public interface IFatture",
+            "line_start": 1,
+            "line_end": 40,
+        },
+    ]
+
+    monkeypatch.setattr(mcp_handler_module, "build_context", lambda **kwargs: ("ctx", retrieval_results))
+    monkeypatch.setattr(mcp_handler_module, "format_context_sheet", lambda **kwargs: "sheet")
+    handler = MCPHandler()
+    monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
+    monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: symbol_results)
+
+    payload = handler._run_rag_context({"query_text": "GeneraFattura fattura api"})
+
+    symbol_follow_up = payload["functional_context"]["tool_hints"]["symbol_follow_up"]
+    suggested_queries = symbol_follow_up["suggested_queries"]
+
+    assert [item["name"] for item in suggested_queries[:3]] == [
+        "GeneraFattura",
+        "FatturazioneService",
+        "IFatture",
+    ]
+    assert [item["source_role"] for item in suggested_queries[:3]] == [
+        "entry_point",
+        "implementation",
+        "contract",
+    ]
+    assert all(item["exact"] is True for item in suggested_queries[:3])
+    assert symbol_follow_up["focus_paths"] == [
+        "pubblico/api/Controllers/Fattura.cs",
+        "librerie/BpoFH/FatturazioneService.cs",
+        "pubblico/api/IFatture.cs",
+    ]
+    assert payload["functional_context"]["tool_hints"]["recommended_follow_up"][0]["tool"] == "symbol_search"
+    assert payload["functional_context"]["tool_hints"]["recommended_follow_up"][0]["suggested_queries"][0]["name"] == "GeneraFattura"
+
+
+def test_rag_context_symbol_follow_up_falls_back_to_query_candidates(monkeypatch, no_warmup):
+    monkeypatch.setattr(mcp_handler_module, "build_context", lambda **kwargs: ("ctx", []))
+    monkeypatch.setattr(mcp_handler_module, "format_context_sheet", lambda **kwargs: "sheet")
+    handler = MCPHandler()
+    monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
+    monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [])
+
+    payload = handler._run_rag_context({"query_text": "Apri GeneraFattura e IFatture"})
+
+    suggested_queries = payload["functional_context"]["tool_hints"]["symbol_follow_up"]["suggested_queries"]
+
+    assert [item["name"] for item in suggested_queries] == ["GeneraFattura", "IFatture"]
+    assert all(item["exact"] is False for item in suggested_queries)
+    assert all(item["source_role"] == "query_candidate" for item in suggested_queries)
+
+
 def test_symbol_search_uses_configured_default_dsn(monkeypatch, no_warmup):
     captured = {}
 
@@ -159,6 +270,38 @@ def test_context_info_exposes_tool_map_and_usage_notes(no_warmup):
     assert "rag_context" in payload["tool_map"]["working_context"]
     assert payload["tool_roles"]["symbol_search"]["role"] == "precision lookup"
     assert payload["usage_notes"]["rag_search"].startswith("Tool di approfondimento/raw")
+
+
+def test_format_functional_context_text_includes_symbol_follow_up_section():
+    text = format_functional_context_text(
+        {
+            "query": {"text": "GeneraFattura", "path_prefix": None},
+            "summary": {"core_file_count": 1, "supporting_match_count": 0, "symbol_hit_count": 2},
+            "entry_points": [],
+            "core_files": [],
+            "supporting_matches": [],
+            "assembled_context": "",
+            "tool_hints": {
+                "symbol_follow_up": {
+                    "suggested_queries": [
+                        {
+                            "name": "GeneraFattura",
+                            "kind": "method",
+                            "exact": True,
+                            "source_path": "pubblico/api/Controllers/Fattura.cs",
+                            "source_role": "entry_point",
+                            "reason": "Conferma il simbolo di ingresso.",
+                        }
+                    ]
+                },
+                "recommended_follow_up": [],
+            },
+        }
+    )
+
+    assert "SYMBOL FOLLOW-UP" in text
+    assert "method GeneraFattura exact=true role=entry_point" in text
+    assert "path=pubblico/api/Controllers/Fattura.cs" in text
 
 
 def test_symbol_search_uses_pool_when_available(monkeypatch, no_warmup):
