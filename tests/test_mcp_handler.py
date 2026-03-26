@@ -149,6 +149,8 @@ def test_context_info_exposes_tool_map_and_usage_notes(no_warmup):
 
     payload = handler._run_context_info()
 
+    assert payload["runtime_name"] == "default"
+    assert payload["config_path"].endswith("config.yaml")
     assert "tool_map" in payload
     assert "tool_roles" in payload
     assert "recommended_workflows" in payload
@@ -583,6 +585,7 @@ def test_context_operational_status_exposes_project_summary(monkeypatch, no_warm
     payload = handler.get_operational_status(ready=True)
 
     assert payload["status"] == "ready"
+    assert payload["runtime_name"] == "default"
     assert payload["multi_project_enabled"] is True
     assert payload["project_count"] == 2
     assert payload["projects"][0]["project_id"] == "alpha"

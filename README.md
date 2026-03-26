@@ -281,6 +281,7 @@ Questo profilo esiste per allineare `llm_context_rework` agli altri MCP del work
 - runtime Python normale
 - config/env/porta separati dal live
 - nessuna condivisione del runtime con `llm_context` attuale
+- `runtime_name` esplicito per riconoscere il server rework da `/health` e `context_info`
 
 Per mantenere i modelli locali dentro il progetto, usa cache locale:
 
@@ -400,6 +401,27 @@ Lo script usa:
 - `config.rework.yaml`
 - `projects.rework.yaml`
 - porta dedicata via `.env.rework` (default consigliato: `8766`)
+
+## Smoke test del runtime rework
+
+Dopo aver configurato `.env.rework`, puoi verificare il server HTTP del rework con:
+
+```bash
+scripts\smoke_test_rework_http.bat
+```
+
+Lo smoke test:
+
+- avvia `mcp_server_http.py` con il profilo rework
+- aspetta `/health`
+- verifica `tools/list`
+- esegue `context_info`, `list_projects` e `get_project_info` via `/rpc`
+
+Per esercitare anche i tool di retrieval:
+
+```bash
+scripts\smoke_test_rework_http.bat --exercise-retrieval
+```
 
 ## Ingest v2 incrementale (locale, senza invio dati)
 
