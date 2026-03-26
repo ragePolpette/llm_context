@@ -34,21 +34,6 @@ from rag_indexer.store import RagStore
 from rag_indexer.work_item_mapper import map_work_item_to_codebase
 
 
-def load_dotenv() -> None:
-    """Load .env file if python-dotenv is available."""
-    try:
-        import dotenv
-    except Exception:
-        return
-    loader = getattr(dotenv, "load_dotenv", None)
-    if callable(loader):
-        dotenv_path = str(os.getenv("LLM_CONTEXT_DOTENV_PATH", "")).strip()
-        if dotenv_path:
-            loader(dotenv_path=dotenv_path)
-            return
-        loader()
-
-
 class UUIDEncoder(json.JSONEncoder):
     """Custom JSON encoder that handles UUID objects."""
 
@@ -62,7 +47,6 @@ class MCPHandler:
     """Handles MCP tool calls (shared logic between stdio and HTTP servers)."""
 
     def __init__(self, config_path: Optional[str] = None) -> None:
-        load_dotenv()
         self._project_root = Path(__file__).resolve().parent.parent
         self._configure_local_model_dirs()
         if config_path is None:
