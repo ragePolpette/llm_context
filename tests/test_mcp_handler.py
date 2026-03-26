@@ -220,6 +220,71 @@ def test_rag_context_symbol_follow_up_falls_back_to_query_candidates(monkeypatch
     assert all(item["source_role"] == "query_candidate" for item in suggested_queries)
 
 
+def test_rag_search_returns_investigation_payload(monkeypatch, no_warmup):
+    retrieval_results = [
+        {
+            "source_path": "pubblico/api/Controllers/Fattura.cs",
+            "score": 0.94,
+            "text_hash": "a1",
+            "line_start": 10,
+            "line_end": 30,
+            "chunk_index": 0,
+            "section_path": "",
+            "snippet": "Controller principale per GeneraFattura.",
+            "text": "public class FatturaController { ... }",
+        },
+        {
+            "source_path": "pubblico/api/Controllers/Fattura.cs",
+            "score": 0.88,
+            "text_hash": "a2",
+            "line_start": 44,
+            "line_end": 60,
+            "chunk_index": 1,
+            "section_path": "",
+            "snippet": "Metodo GeneraFattura.",
+            "text": "public void GeneraFattura() { ... }",
+        },
+        {
+            "source_path": "librerie/BpoFH/FatturazioneService.cs",
+            "score": 0.82,
+            "text_hash": "b1",
+            "line_start": 5,
+            "line_end": 25,
+            "chunk_index": 0,
+            "section_path": "",
+            "snippet": "Implementazione del servizio fatture.",
+            "text": "public class FatturazioneService { ... }",
+        },
+    ]
+    symbol_results = [
+        {
+            "source_path": "pubblico/api/Controllers/Fattura.cs",
+            "name": "GeneraFattura",
+            "kind": "method",
+            "signature": "public void GeneraFattura()",
+            "line_start": 44,
+            "line_end": 60,
+        }
+    ]
+
+    monkeypatch.setattr(mcp_handler_module, "build_context", lambda **kwargs: ("ctx", retrieval_results))
+    monkeypatch.setattr(mcp_handler_module, "format_context_sheet", lambda **kwargs: "sheet")
+    handler = MCPHandler()
+    monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
+    monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: symbol_results)
+
+    payload = handler._run_rag_search({"query_text": "GeneraFattura fattura api"})
+
+    assert payload["summary"]["result_count"] == 3
+    assert payload["summary"]["unique_file_count"] == 2
+    assert payload["summary"]["coverage"] == "focused_multi_file"
+    assert payload["meta"]["search_mode"] == "investigation"
+    assert payload["result_groups"][0]["source_path"] == "pubblico/api/Controllers/Fattura.cs"
+    assert payload["result_groups"][0]["hit_count"] == 2
+    assert payload["investigation_hints"]["suggested_files"][0] == "pubblico/api/Controllers/Fattura.cs"
+    assert payload["investigation_hints"]["suggested_symbol_queries"][0]["name"] == "GeneraFattura"
+
+
 def test_symbol_search_uses_configured_default_dsn(monkeypatch, no_warmup):
     captured = {}
 
@@ -269,6 +334,13 @@ def test_context_info_exposes_tool_map_and_usage_notes(no_warmup):
     assert "recommended_workflows" in payload
     assert "rag_context" in payload["tool_map"]["working_context"]
     assert payload["tool_roles"]["symbol_search"]["role"] == "precision lookup"
+    assert payload["tool_roles"]["rag_search"]["returns"] == [
+        "results",
+        "summary",
+        "result_groups",
+        "investigation_hints",
+        "meta",
+    ]
     assert payload["usage_notes"]["rag_search"].startswith("Tool di approfondimento/raw")
 
 
@@ -302,6 +374,50 @@ def test_format_functional_context_text_includes_symbol_follow_up_section():
     assert "SYMBOL FOLLOW-UP" in text
     assert "method GeneraFattura exact=true role=entry_point" in text
     assert "path=pubblico/api/Controllers/Fattura.cs" in text
+
+
+def test_format_tool_text_formats_rag_search_as_investigation_summary():
+    text = format_tool_text(
+        "rag_search",
+        {},
+        {
+            "query": {"text": "GeneraFattura", "path_prefix": None},
+            "summary": {
+                "result_count": 2,
+                "unique_file_count": 1,
+                "coverage": "single_hotspot",
+                "top_score": 0.94,
+            },
+            "result_groups": [
+                {
+                    "source_path": "pubblico/api/Controllers/Fattura.cs",
+                    "hit_count": 2,
+                    "top_score": 0.94,
+                    "line_spans": ["L10-L30", "L44-L60"],
+                }
+            ],
+            "investigation_hints": {
+                "suggested_files": ["pubblico/api/Controllers/Fattura.cs"],
+                "suggested_symbol_queries": [
+                    {"name": "GeneraFattura", "kind": "method", "exact": True}
+                ],
+            },
+            "results": [
+                {
+                    "source_path": "pubblico/api/Controllers/Fattura.cs",
+                    "score": 0.94,
+                    "line_start": 44,
+                    "line_end": 60,
+                    "snippet": "Metodo GeneraFattura.",
+                }
+            ],
+        },
+    )
+
+    assert "RAG SEARCH" in text
+    assert "TOP FILES" in text
+    assert "INVESTIGATION HINTS" in text
+    assert "symbol_search: method GeneraFattura exact=true" in text
 
 
 def test_symbol_search_uses_pool_when_available(monkeypatch, no_warmup):

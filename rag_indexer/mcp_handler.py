@@ -437,13 +437,43 @@ class MCPHandler:
         return payload
 
     def _run_rag_search(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Execute rag_search tool returning raw retrieval data."""
-        payload = self._run_rag_context(args, tool_name="rag_search")
-        payload.pop("functional_context", None)
-        payload.pop("context", None)
-        payload.pop("context_sheet", None)
-        payload.pop("symbol_results", None)
-        return payload
+        """Execute rag_search tool returning raw retrieval data plus investigation hints."""
+        base_payload = self._run_rag_context(args, tool_name="rag_search")
+        results = base_payload.get("results") or []
+        meta = dict(base_payload.get("meta") or {})
+        functional_context = base_payload.get("functional_context") or {}
+        tool_hints = functional_context.get("tool_hints") or {}
+        symbol_follow_up = tool_hints.get("symbol_follow_up") or {}
+        result_groups = _build_rag_search_result_groups(results)
+        summary = {
+            "result_count": len(results),
+            "unique_file_count": len(result_groups),
+            "top_score": max((float(item.get("score") or 0.0) for item in results), default=0.0),
+            "auto_scope_fallback_used": bool(meta.get("auto_scope_fallback_used")),
+            "coverage": _classify_rag_search_coverage(result_groups),
+        }
+        investigation_hints = _build_rag_search_hints(
+            result_groups=result_groups,
+            symbol_follow_up=symbol_follow_up,
+            meta=meta,
+        )
+        return {
+            "query": {
+                "text": functional_context.get("query", {}).get("text"),
+                "path_prefix": meta.get("path_prefix"),
+                "top_k": meta.get("top_k"),
+                "doc_type": args.get("doc_type") or self._config.default_doc_type,
+                "language": args.get("language"),
+            },
+            "summary": summary,
+            "result_groups": result_groups,
+            "investigation_hints": investigation_hints,
+            "results": results,
+            "meta": {
+                **meta,
+                "search_mode": "investigation",
+            },
+        }
 
     def _run_context_info(self) -> dict[str, Any]:
         """Describe scope and boundaries of llm-context MCP."""
@@ -485,7 +515,7 @@ class MCPHandler:
                         "vuoi vedere i match raw del retrieval",
                         "devi approfondire, confermare o debuggare la copertura della query",
                     ],
-                    "returns": ["results", "meta"],
+                    "returns": ["results", "summary", "result_groups", "investigation_hints", "meta"],
                 },
                 "symbol_search": {
                     "role": "precision lookup",
@@ -524,7 +554,7 @@ class MCPHandler:
                     "Tool principale per lavorare: restituisce un package funzionale assemblato di default."
                 ),
                 "rag_search": (
-                    "Tool di approfondimento/raw: restituisce retrieval grezzo senza assembly."
+                    "Tool di approfondimento/raw: restituisce hit grezzi, gruppi per file e hint di investigazione."
                 ),
                 "map_work_item_to_codebase": (
                     "Tool strutturato per mappare richieste funzionali o ticket verso prodotto/repo/area."
@@ -976,6 +1006,7 @@ def tool_rag_search() -> dict[str, Any]:
         "ingest o refresh indice. In single-project mode puo' usare un default project solo se "
         "supportato in modo sicuro; in multi-project mode richiede project_id esplicito."
     )
+    tool["inputSchema"]["properties"]["format"]["description"] = "investigation (default) oppure json"
     return tool
 
 
@@ -1105,6 +1136,10 @@ def format_tool_text(name: str, args: dict[str, Any], payload: dict[str, Any]) -
         if format_hint in {"sheet", "context-sheet"}:
             return str(payload.get("context_sheet", ""))
         return format_functional_context_text(payload.get("functional_context") or {})
+    if name == "rag_search":
+        if format_hint in {"json", "full"}:
+            return json.dumps(payload, indent=2, ensure_ascii=True, cls=UUIDEncoder)
+        return format_rag_search_text(payload)
     return json.dumps(payload, indent=2, ensure_ascii=True, cls=UUIDEncoder)
 
 
@@ -1232,6 +1267,68 @@ def format_functional_context_text(payload: dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
+def format_rag_search_text(payload: dict[str, Any]) -> str:
+    query = payload.get("query") or {}
+    summary = payload.get("summary") or {}
+    result_groups = payload.get("result_groups") or []
+    investigation_hints = payload.get("investigation_hints") or {}
+    results = payload.get("results") or []
+
+    lines: list[str] = [
+        "RAG SEARCH",
+        f"query: {str(query.get('text') or '(vuoto)')}",
+        f"scope: {str(query.get('path_prefix') or '(nessuno)')}",
+        (
+            "summary: "
+            f"results={int(summary.get('result_count') or 0)} "
+            f"files={int(summary.get('unique_file_count') or 0)} "
+            f"coverage={summary.get('coverage') or 'unknown'} "
+            f"top_score={float(summary.get('top_score') or 0.0):.4f}"
+        ),
+        "",
+    ]
+    if result_groups:
+        lines.append("TOP FILES")
+        for item in result_groups[:5]:
+            line_spans = item.get("line_spans") or []
+            line = (
+                f"- {item.get('source_path')} hits={int(item.get('hit_count') or 0)} "
+                f"top_score={float(item.get('top_score') or 0.0):.4f}"
+            )
+            if line_spans:
+                line += f" lines={','.join(str(span) for span in line_spans)}"
+            lines.append(line)
+        lines.append("")
+    suggested_files = investigation_hints.get("suggested_files") or []
+    suggested_symbols = investigation_hints.get("suggested_symbol_queries") or []
+    if suggested_files or suggested_symbols:
+        lines.append("INVESTIGATION HINTS")
+        for source_path in suggested_files[:4]:
+            lines.append(f"- narrow_to_file: {source_path}")
+        for item in suggested_symbols[:4]:
+            name = item.get("name") or "(unknown)"
+            kind = item.get("kind") or "symbol"
+            exact = bool(item.get("exact", False))
+            lines.append(f"- symbol_search: {kind} {name} exact={str(exact).lower()}")
+        lines.append("")
+    if results:
+        lines.append("RAW MATCHES")
+        for index, item in enumerate(results[:5], start=1):
+            source_path = item.get("source_path") or "(unknown)"
+            score = float(item.get("score") or 0.0)
+            line_start = item.get("line_start")
+            line_end = item.get("line_end")
+            snippet = str(item.get("snippet") or item.get("text") or "").strip()
+            if line_start and line_end:
+                lines.append(f"{index}. {source_path} #L{line_start}-L{line_end} score={score:.4f}")
+            else:
+                lines.append(f"{index}. {source_path} score={score:.4f}")
+            if snippet:
+                lines.append(snippet)
+            lines.append("")
+    return "\n".join(lines).strip()
+
+
 def _build_tool_hints(
     *,
     query_text: Any,
@@ -1279,6 +1376,81 @@ def _build_tool_hints(
                 "reason": "Usa context_info per rileggere ruoli, limiti e workflow consigliati dei tool MCP.",
             },
         ],
+    }
+
+
+def _build_rag_search_result_groups(results: list[dict[str, Any]], *, limit: int = 8) -> list[dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    for item in results:
+        source_path = str(item.get("source_path") or "").strip()
+        if not source_path:
+            continue
+        group = groups.setdefault(
+            source_path,
+            {
+                "source_path": source_path,
+                "hit_count": 0,
+                "top_score": 0.0,
+                "line_spans": [],
+                "sample_snippet": "",
+            },
+        )
+        group["hit_count"] += 1
+        score = float(item.get("score") or 0.0)
+        group["top_score"] = max(float(group.get("top_score") or 0.0), score)
+        line_start = item.get("line_start")
+        line_end = item.get("line_end")
+        if line_start and line_end:
+            span = f"L{line_start}-L{line_end}"
+            if span not in group["line_spans"] and len(group["line_spans"]) < 3:
+                group["line_spans"].append(span)
+        if not group["sample_snippet"]:
+            group["sample_snippet"] = str(item.get("snippet") or item.get("text") or "").strip()
+
+    ranked = sorted(
+        groups.values(),
+        key=lambda item: (
+            -int(item.get("hit_count") or 0),
+            -float(item.get("top_score") or 0.0),
+            str(item.get("source_path") or ""),
+        ),
+    )
+    return ranked[:limit]
+
+
+def _classify_rag_search_coverage(result_groups: list[dict[str, Any]]) -> str:
+    if not result_groups:
+        return "no_hits"
+    if len(result_groups) == 1:
+        return "single_hotspot"
+    if len(result_groups) <= 3:
+        return "focused_multi_file"
+    return "broad_spread"
+
+
+def _build_rag_search_hints(
+    *,
+    result_groups: list[dict[str, Any]],
+    symbol_follow_up: dict[str, Any],
+    meta: dict[str, Any],
+) -> dict[str, Any]:
+    suggested_files = [str(item.get("source_path") or "") for item in result_groups if item.get("source_path")]
+    suggested_symbol_queries = symbol_follow_up.get("suggested_queries") or []
+    recommended_next_steps: list[str] = []
+    if result_groups:
+        recommended_next_steps.append("Restringi su uno dei file top per confermare il punto giusto del retrieval.")
+    if meta.get("auto_scope_fallback_used"):
+        recommended_next_steps.append("L'auto-scope iniziale non ha retto: prova una query piu' esplicita o uno scope manuale.")
+    if suggested_symbol_queries:
+        recommended_next_steps.append("Apri i simboli suggeriti con symbol_search per verificare signature e linee esatte.")
+    if not result_groups:
+        recommended_next_steps.append("Allarga la query o rimuovi filtri troppo stretti per recuperare segnali raw.")
+
+    return {
+        "mode": "raw_investigation",
+        "suggested_files": suggested_files[:4],
+        "suggested_symbol_queries": suggested_symbol_queries[:4],
+        "recommended_next_steps": recommended_next_steps,
     }
 
 
