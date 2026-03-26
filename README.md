@@ -393,7 +393,7 @@ python cli.py init-db-v2 --dsn "postgresql://<user>:<password>@localhost:5432/po
 Per avviare il rework come servizio separato:
 
 1. copia `config.local.example.rework.env` in `.env.rework`
-2. imposta il `LLM_CONTEXT_DSN` dedicato del rework
+2. imposta il `LLM_CONTEXT_DSN` dedicato del rework, preferibilmente su un database separato come `llm_context_rework`
 3. avvia `scripts/start_http_server_rework.bat`
 
 Lo script usa:
@@ -401,6 +401,15 @@ Lo script usa:
 - `config.rework.yaml`
 - `projects.rework.yaml`
 - porta dedicata via `.env.rework` (default consigliato: `8766`)
+
+Script operativi del runtime rework:
+
+- `scripts/start_http_server_rework.bat`
+- `scripts/start_stdio_server_rework.bat`
+- `scripts/init_rework_db.bat`
+- `scripts/ingest_rework.bat`
+- `scripts/rework_status.bat`
+- `scripts/stop_http_server_rework.bat`
 
 ## Smoke test del runtime rework
 
@@ -416,6 +425,7 @@ Lo smoke test:
 - aspetta `/health`
 - verifica `tools/list`
 - esegue `context_info`, `list_projects` e `get_project_info` via `/rpc`
+- verifica che `storage_target` sia visibile nel payload di health
 
 Per esercitare anche i tool di retrieval:
 

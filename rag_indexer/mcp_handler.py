@@ -7,6 +7,7 @@ Shared logic for both stdio and HTTP MCP servers.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import sys
@@ -15,6 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from rag_indexer.agent_context import build_context
 from rag_indexer.config import load_config
@@ -93,6 +95,9 @@ class MCPHandler:
         self._runtime_name = str(
             os.getenv("LLM_CONTEXT_RUNTIME_NAME", "default")
         ).strip() or "default"
+        self._store_target_name = str(
+            os.getenv("LLM_CONTEXT_STORE_TARGET", "")
+        ).strip() or None
         self._max_query_embedding_items = int(
             os.getenv("LLM_CONTEXT_MAX_QUERY_EMBEDDING_ITEMS", "4096")
         )
@@ -446,6 +451,7 @@ class MCPHandler:
             "server": "llm-context-mcp",
             "runtime_name": self._runtime_name,
             "config_path": self._config_path,
+            "storage_target": self._build_storage_target_summary(),
             "purpose": "Recupero contesto da codice/documenti indicizzati (RAG).",
             "multi_project_enabled": self._config.multi_project_enabled,
             "write_enabled": self._config.write_enabled,
@@ -680,11 +686,32 @@ class MCPHandler:
             "status": "ready" if ready else "loading",
             "runtime_name": self._runtime_name,
             "config_path": self._config_path,
+            "storage_target": self._build_storage_target_summary(),
             "multi_project_enabled": self._config.multi_project_enabled,
             "ingest_enabled": self._config.ingest_enabled,
             "write_enabled": self._config.write_enabled,
             "project_count": len(projects),
             "projects": projects,
+        }
+
+    def _build_storage_target_summary(self) -> dict[str, Any]:
+        parsed = urlsplit(self._default_dsn)
+        database = parsed.path.lstrip("/") if parsed.path else ""
+        database = database or None
+        fingerprint = hashlib.sha256(
+            self._default_dsn.encode("utf-8", errors="ignore")
+        ).hexdigest()[:12]
+        dedicated_candidate = True
+        if not database or database.lower() in {"postgres", "template0", "template1"}:
+            dedicated_candidate = False
+        return {
+            "name": self._store_target_name,
+            "scheme": parsed.scheme or None,
+            "host": parsed.hostname or None,
+            "port": parsed.port,
+            "database": database,
+            "dsn_fingerprint": fingerprint,
+            "dedicated_candidate": dedicated_candidate,
         }
 
     def _resolve_project_id(self, args: dict[str, Any], *, tool_name: str) -> str:
