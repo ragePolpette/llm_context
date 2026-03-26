@@ -55,11 +55,17 @@ def test_assemble_functional_context_groups_matches_by_file_and_attaches_symbols
     )
 
     assert payload["summary"]["core_file_count"] == 2
+    assert payload["package_version"] == "functional_context_v1"
+    assert payload["query"]["terms"] == ["genera", "fattura"]
     assert payload["core_files"][0]["source_path"] == "pubblico/api/Controllers/Fattura.cs"
     assert payload["core_files"][0]["match_count"] == 2
     assert payload["core_files"][0]["symbol_hits"][0]["name"] == "GeneraFattura"
+    assert payload["core_files"][0]["query_overlap_terms"] == ["fattura"]
+    assert "query_overlap=" in payload["core_files"][0]["selection_reason"]
     assert payload["entry_points"][0]["name"] == "GeneraFattura"
+    assert payload["summary"]["query_term_count"] == 2
     assert "FILE pubblico/api/Controllers/Fattura.cs" in payload["assembled_context"]
+    assert "selection_reason=" in payload["assembled_context"]
 
 
 def test_assemble_functional_context_deduplicates_repeated_chunk_hashes():
@@ -120,3 +126,97 @@ def test_assemble_functional_context_respects_limits_for_core_files_and_supporti
 
     assert len(payload["core_files"]) == 2
     assert len(payload["supporting_matches"]) == 2
+
+
+def test_assemble_functional_context_prefers_files_with_query_overlap_and_symbols():
+    retrieval_results = [
+        {
+            "source_path": "pubblico/api/Controllers/Noise.cs",
+            "score": 1.05,
+            "text_hash": "noise",
+            "line_start": 1,
+            "line_end": 10,
+            "chunk_index": 0,
+            "snippet": "Gestione generica del menu.",
+            "text": "public class MenuController { }",
+        },
+        {
+            "source_path": "pubblico/api/Controllers/Fattura.cs",
+            "score": 0.91,
+            "text_hash": "fattura",
+            "line_start": 40,
+            "line_end": 70,
+            "chunk_index": 0,
+            "snippet": "Metodo GeneraFattura per la fatturazione studi.",
+            "text": "public void GeneraFattura() { ... }",
+        },
+    ]
+    symbol_results = [
+        {
+            "source_path": "pubblico/api/Controllers/Fattura.cs",
+            "name": "GeneraFattura",
+            "kind": "method",
+            "signature": "public void GeneraFattura()",
+            "line_start": 44,
+            "line_end": 60,
+        },
+        {
+            "source_path": "pubblico/api/Controllers/Noise.cs",
+            "name": "ListMenu",
+            "kind": "method",
+            "signature": "public void ListMenu()",
+            "line_start": 10,
+            "line_end": 20,
+        },
+    ]
+
+    payload = assemble_functional_context(
+        query_text="GeneraFattura fattura",
+        retrieval_results=retrieval_results,
+        symbol_results=symbol_results,
+    )
+
+    assert payload["core_files"][0]["source_path"] == "pubblico/api/Controllers/Fattura.cs"
+    assert payload["entry_points"][0]["source_path"] == "pubblico/api/Controllers/Fattura.cs"
+    assert payload["core_files"][0]["evidence_kinds"] == ["retrieval", "symbol", "query_overlap"]
+
+
+def test_assemble_functional_context_prioritizes_entry_points_from_core_files():
+    retrieval_results = [
+        {
+            "source_path": "pubblico/api/Controllers/Fattura.cs",
+            "score": 0.95,
+            "text_hash": "fattura",
+            "line_start": 30,
+            "line_end": 50,
+            "chunk_index": 0,
+            "snippet": "Metodo GeneraFattura.",
+            "text": "public void GeneraFattura() { ... }",
+        }
+    ]
+    symbol_results = [
+        {
+            "source_path": "librerie/BpoFH/OtherService.cs",
+            "name": "BootstrapService",
+            "kind": "class",
+            "signature": "public class BootstrapService",
+            "line_start": 1,
+            "line_end": 10,
+        },
+        {
+            "source_path": "pubblico/api/Controllers/Fattura.cs",
+            "name": "GeneraFattura",
+            "kind": "method",
+            "signature": "public void GeneraFattura()",
+            "line_start": 44,
+            "line_end": 60,
+        },
+    ]
+
+    payload = assemble_functional_context(
+        query_text="GeneraFattura",
+        retrieval_results=retrieval_results,
+        symbol_results=symbol_results,
+    )
+
+    assert payload["entry_points"][0]["name"] == "GeneraFattura"
