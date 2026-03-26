@@ -12,19 +12,6 @@ from pathlib import Path
 from typing import Any
 
 
-def _load_env_file(path: Path) -> dict[str, str]:
-    env: dict[str, str] = {}
-    if not path.exists():
-        return env
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        env[key.strip()] = value.strip()
-    return env
-
-
 def _http_json(url: str, *, method: str = "GET", payload: dict[str, Any] | None = None) -> dict[str, Any]:
     data = None
     headers = {"Accept": "application/json"}
@@ -64,22 +51,34 @@ def _wait_for_health(base_url: str, *, timeout_sec: float) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Smoke test del runtime HTTP rework di llm-context")
-    parser.add_argument("--env-file", default=".env.rework")
     parser.add_argument("--config-path", default="config.rework.yaml")
+    parser.add_argument("--dsn", default=None)
+    parser.add_argument("--runtime-name", default=None)
+    parser.add_argument("--host", default=None)
+    parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--timeout-sec", type=float, default=30.0)
     parser.add_argument("--exercise-retrieval", action="store_true")
     args = parser.parse_args()
 
     root_dir = Path(__file__).resolve().parent.parent
-    env_file = (root_dir / args.env_file).resolve()
     config_path = (root_dir / args.config_path).resolve()
     env = os.environ.copy()
-    env.update(_load_env_file(env_file))
-    env.setdefault("LLM_CONTEXT_DOTENV_PATH", str(env_file))
     env.setdefault("LLM_CONTEXT_CONFIG_PATH", str(config_path))
+    if args.dsn:
+        env["LLM_CONTEXT_DSN"] = args.dsn
+    if args.runtime_name:
+        env["LLM_CONTEXT_RUNTIME_NAME"] = args.runtime_name
     env.setdefault("LLM_CONTEXT_RUNTIME_NAME", "rework")
     env.setdefault("PYTHONPATH", str(root_dir))
     env["LLM_CONTEXT_EMBEDDER"] = "local-hash"
+    if args.host:
+        env["MCP_HOST"] = args.host
+    if args.port is not None:
+        env["MCP_PORT"] = str(args.port)
+    if not env.get("LLM_CONTEXT_DSN"):
+        raise RuntimeError(
+            "LLM_CONTEXT_DSN non impostato. Passalo al processo oppure usa --dsn nello smoke test."
+        )
 
     host = env.get("MCP_HOST", "127.0.0.1")
     port = int(env.get("MCP_PORT", "8766"))
