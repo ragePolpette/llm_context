@@ -58,6 +58,7 @@ def assemble_functional_context(
             "symbol_hit_count": len(symbol_results),
             "query_term_count": len(query_terms),
             "assembled_char_count": len(assembled_context),
+            "role_counts": _count_roles(core_files),
         },
         "entry_points": entry_points,
         "core_files": core_files,
@@ -92,6 +93,8 @@ def _group_results_by_file(
                 "query_overlap_terms": [],
                 "evidence_kinds": [],
                 "selection_reason": "",
+                "functional_role": "supporting",
+                "role_reason": "",
             },
         )
         seen_hashes = seen_hashes_per_file.setdefault(source_path, set())
@@ -135,6 +138,8 @@ def _group_results_by_file(
                 "query_overlap_terms": [],
                 "evidence_kinds": [],
                 "selection_reason": "",
+                "functional_role": "supporting",
+                "role_reason": "",
             },
         )
         group["symbol_hits"].append(
@@ -172,24 +177,35 @@ def _group_results_by_file(
             evidence_kinds.append("query_overlap")
         group["evidence_kinds"] = evidence_kinds
 
+        functional_role, role_reason, role_score = _infer_functional_role(
+            source_path=str(group.get("source_path") or ""),
+            symbol_hits=group.get("symbol_hits") or [],
+            matches=group.get("matches") or [],
+        )
+        group["functional_role"] = functional_role
+        group["role_reason"] = role_reason
+
         group["rank_score"] = (
             float(group["aggregate_score"])
             + float(group["max_score"]) * 0.75
             + min(len(group["symbol_hits"]), 4) * 0.15
             + min(len(overlap_terms), 4) * 0.18
             + min(int(group["match_count"] or 0), 3) * 0.05
+            + role_score
         )
         group["selection_reason"] = _build_selection_reason(
             match_count=int(group.get("match_count") or 0),
             symbol_count=len(group.get("symbol_hits") or []),
             overlap_terms=overlap_terms,
             max_score=float(group.get("max_score") or 0.0),
+            functional_role=functional_role,
         )
 
     return sorted(
         groups.values(),
         key=lambda item: (
             -float(item["rank_score"]),
+            _functional_role_rank(str(item.get("functional_role") or "")),
             -len(item.get("query_overlap_terms") or []),
             -float(item["max_score"]),
             item["source_path"],
@@ -283,6 +299,13 @@ def _render_assembled_context(core_files: list[dict[str, Any]], max_chars: int) 
                 f"rank_score={float(file_item.get('rank_score') or 0.0):.4f}"
             ),
         ]
+        functional_role = str(file_item.get("functional_role") or "").strip()
+        role_reason = str(file_item.get("role_reason") or "").strip()
+        if functional_role:
+            role_line = f"functional_role={functional_role}"
+            if role_reason:
+                role_line += f" role_reason={role_reason}"
+            lines.append(role_line)
         selection_reason = str(file_item.get("selection_reason") or "").strip()
         if selection_reason:
             lines.append(f"selection_reason={selection_reason}")
@@ -378,8 +401,11 @@ def _build_selection_reason(
     symbol_count: int,
     overlap_terms: list[str],
     max_score: float,
+    functional_role: str,
 ) -> str:
     reasons: list[str] = []
+    if functional_role:
+        reasons.append(f"role={functional_role}")
     if overlap_terms:
         reasons.append("query_overlap=" + ",".join(overlap_terms[:4]))
     if symbol_count:
@@ -388,3 +414,61 @@ def _build_selection_reason(
         reasons.append(f"matches={match_count}")
     reasons.append(f"max_score={max_score:.4f}")
     return "; ".join(reasons)
+
+
+def _infer_functional_role(
+    *,
+    source_path: str,
+    symbol_hits: list[dict[str, Any]],
+    matches: list[dict[str, Any]],
+) -> tuple[str, str, float]:
+    path_lower = source_path.replace("/", "\\").lower()
+    symbol_names = " ".join(str(item.get("name") or "") for item in symbol_hits).lower()
+    symbol_signatures = " ".join(str(item.get("signature") or "") for item in symbol_hits).lower()
+    snippet_text = " ".join(
+        str(item.get("snippet") or item.get("text") or "")
+        for item in matches
+    ).lower()
+
+    if any(item.get("kind") in {"interface"} for item in symbol_hits):
+        return ("contract", "interface symbol detected", 0.16)
+    if re.search(r"\\i[a-z0-9_]+\.cs$", path_lower):
+        return ("contract", "interface-like file name", 0.14)
+    if any(
+        marker in path_lower
+        for marker in ("\\controller", "\\controllers\\", "\\handler", "\\handlers\\", "endpoint")
+    ):
+        return ("entry_point", "path suggests request/entry surface", 0.32)
+    if "\\api\\" in path_lower and any(
+        token in snippet_text or token in symbol_names or token in symbol_signatures
+        for token in ("controller", "endpoint", "handler")
+    ):
+        return ("entry_point", "api surface with request handlers", 0.28)
+    if any(
+        marker in path_lower
+        for marker in ("service", "manager", "provider", "repository", "engine", "worker")
+    ) or any(token in symbol_signatures for token in ("service", "manager", "provider", "repository")):
+        return ("implementation", "service/implementation file pattern", 0.22)
+    if any(item.get("kind") in {"class", "method", "function"} for item in symbol_hits) and matches:
+        return ("implementation", "retrieval matches plus executable symbols", 0.18)
+    if snippet_text:
+        return ("supporting", "supporting retrieval evidence", 0.05)
+    return ("supporting", "limited evidence", 0.0)
+
+
+def _functional_role_rank(role: str) -> int:
+    order = {
+        "entry_point": 0,
+        "implementation": 1,
+        "contract": 2,
+        "supporting": 3,
+    }
+    return order.get(role.strip().lower(), 99)
+
+
+def _count_roles(core_files: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in core_files:
+        role = str(item.get("functional_role") or "supporting").strip() or "supporting"
+        counts[role] = counts.get(role, 0) + 1
+    return counts
