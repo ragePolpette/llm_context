@@ -55,6 +55,19 @@ Lo stato runtime di ingest viene salvato separatamente in `projects.state.json`,
 - `index_version`
 - `index_fingerprint`
 
+Per ogni progetto viene inoltre mantenuto un manifest separato in `project_manifests/<project_id>.index_manifest.json`.
+Il manifest serve per health e diagnostica operativa e include, tra gli altri:
+
+- `last_ingest_status`
+- `last_ingest_started_at`
+- `last_ingest_completed_at`
+- `indexed_documents`
+- `indexed_chunks`
+- `indexed_symbols`
+- `config_fingerprint`
+- `source_fingerprint`
+- `store_target`
+
 ## Read-plane vs write-plane
 
 Il piano MCP standard resta di sola retrieval:
@@ -96,6 +109,7 @@ Comportamento:
 - `ingest` valida il `project_id` contro il registry
 - se il progetto esiste nel registry, risolve `root_path` e profilo base dal registry
 - aggiorna `projects.state.json` con stato, durata e fingerprint indice
+- aggiorna anche il manifest per-progetto con conteggi indice, target storage e fingerprint operativi
 - `ingest-enabled-projects` esegue batch solo sui progetti con `ingest_enabled=true`
 
 Questo modello e' pensato per essere schedulato esternamente senza esporre l'ingest come capability MCP always-on.
@@ -110,6 +124,8 @@ L'endpoint `/health` espone ora anche stato operativo utile per la dashboard est
 - `write_enabled`
 - `project_count`
 - riepilogo per progetto con stato ingest e freshness base
+- `project_manifest_dir`
+- riepilogo manifest per progetto con conteggi indice e ultimo stato ingest
 
 ## Spiegazione teorica (cosa abbiamo fatto e perche')
 

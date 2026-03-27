@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -9,6 +10,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from rag_indexer.config import (
     DEFAULT_EXCLUDE_DIRS,
@@ -403,11 +405,51 @@ def _run_ingest_command(args, config, registry: ProjectRegistry, project_id: str
     max_bytes = args.max_bytes or config.max_bytes
 
     started_at = datetime.now(timezone.utc).isoformat()
+    config_fingerprint = _build_config_fingerprint(
+        project_id=project_id,
+        root_path=root_path,
+        include_patterns=include_patterns,
+        exclude_patterns=exclude_patterns,
+        include_dirs=include_dirs,
+        exclude_globs=exclude_globs,
+        embedding_dim=embedding_dim,
+        assets_template_only=assets_template_only,
+        assets_root_dir=assets_root_dir,
+        assets_template_dir=assets_template_dir,
+        chunk_size=args.chunk_size or config.chunk_size,
+        chunk_overlap=args.chunk_overlap or config.chunk_overlap,
+        md_chunk_size=args.md_chunk_size or config.md_chunk_size,
+        code_chunk_size=args.code_chunk_size or config.code_chunk_size,
+        min_chunk_chars=args.min_chunk_chars or config.min_chunk_chars,
+        incremental=args.incremental or config.incremental_ingest,
+        embedder=embedder,
+    )
+    source_fingerprint = _build_source_fingerprint(
+        project_id=project_id,
+        root_path=root_path,
+        include_dirs=include_dirs,
+        exclude_globs=exclude_globs,
+    )
+    store_target = _build_store_target_summary(args.dsn)
     if registry.project_count() > 0:
         registry.save_runtime_state(
             project_id,
             last_ingest_status="running",
             last_ingest_started_at=started_at,
+        )
+        registry.save_index_manifest(
+            project_id,
+            {
+                "index_version": "v2",
+                "schema_version": "v2",
+                "last_ingest_started_at": started_at,
+                "last_ingest_status": "running",
+                "config_fingerprint": config_fingerprint,
+                "source_fingerprint": source_fingerprint,
+                "store_target": store_target,
+                "embedder_model": _embedder_identity(embedder),
+                "last_error": None,
+            },
         )
     conn = get_connection(args.dsn)
     try:
@@ -435,12 +477,28 @@ def _run_ingest_command(args, config, registry: ProjectRegistry, project_id: str
             logger=logging.getLogger("rag_indexer"),
             symbol_search_enabled=config.symbol_search_enabled,
         )
-    except Exception:
+        repo_stats = store.get_repo_stats(project_id)
+    except Exception as exc:
         if registry.project_count() > 0:
             registry.save_runtime_state(
                 project_id,
                 last_ingest_status="failed",
                 last_ingest_finished_at=datetime.now(timezone.utc).isoformat(),
+            )
+            registry.save_index_manifest(
+                project_id,
+                {
+                    "index_version": "v2",
+                    "schema_version": "v2",
+                    "last_ingest_started_at": started_at,
+                    "last_ingest_completed_at": datetime.now(timezone.utc).isoformat(),
+                    "last_ingest_status": "failed",
+                    "config_fingerprint": config_fingerprint,
+                    "source_fingerprint": source_fingerprint,
+                    "store_target": store_target,
+                    "embedder_model": _embedder_identity(embedder),
+                    "last_error": str(exc),
+                },
             )
         raise
     finally:
@@ -448,6 +506,7 @@ def _run_ingest_command(args, config, registry: ProjectRegistry, project_id: str
 
     finished_at = datetime.now(timezone.utc).isoformat()
     if registry.project_count() > 0:
+        index_fingerprint = _build_index_fingerprint(project_id, stats)
         registry.save_runtime_state(
             project_id,
             last_ingest_status="success",
@@ -455,7 +514,26 @@ def _run_ingest_command(args, config, registry: ProjectRegistry, project_id: str
             last_successful_ingest_at=finished_at,
             last_ingest_duration_sec=stats.duration_sec,
             index_version="v2",
-            index_fingerprint=_build_index_fingerprint(project_id, stats),
+            index_fingerprint=index_fingerprint,
+        )
+        registry.save_index_manifest(
+            project_id,
+            {
+                "index_version": "v2",
+                "schema_version": "v2",
+                "last_ingest_started_at": started_at,
+                "last_ingest_completed_at": finished_at,
+                "last_ingest_status": "success",
+                "indexed_documents": repo_stats["indexed_documents"],
+                "indexed_chunks": repo_stats["indexed_chunks"],
+                "indexed_symbols": repo_stats["indexed_symbols"],
+                "index_fingerprint": index_fingerprint,
+                "config_fingerprint": config_fingerprint,
+                "source_fingerprint": source_fingerprint,
+                "store_target": store_target,
+                "embedder_model": _embedder_identity(embedder),
+                "last_error": None,
+            },
         )
     return stats
 
@@ -487,6 +565,83 @@ def _build_index_fingerprint(project_id: str, stats) -> str:
         f"{stats.chunks_inserted}:"
         f"{stats.deleted_rows}"
     )
+
+
+def _build_config_fingerprint(
+    *,
+    project_id: str,
+    root_path: Path,
+    include_patterns: list[str],
+    exclude_patterns: list[str],
+    include_dirs: list[str],
+    exclude_globs: list[str],
+    embedding_dim: int,
+    assets_template_only: bool,
+    assets_root_dir: str,
+    assets_template_dir: str,
+    chunk_size: int,
+    chunk_overlap: int,
+    md_chunk_size: int,
+    code_chunk_size: int,
+    min_chunk_chars: int,
+    incremental: bool,
+    embedder: Embedder,
+) -> str:
+    payload = {
+        "project_id": project_id,
+        "root_path": str(root_path),
+        "include_patterns": include_patterns,
+        "exclude_patterns": exclude_patterns,
+        "include_dirs": include_dirs,
+        "exclude_globs": exclude_globs,
+        "embedding_dim": embedding_dim,
+        "assets_template_only": assets_template_only,
+        "assets_root_dir": assets_root_dir,
+        "assets_template_dir": assets_template_dir,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+        "md_chunk_size": md_chunk_size,
+        "code_chunk_size": code_chunk_size,
+        "min_chunk_chars": min_chunk_chars,
+        "incremental": incremental,
+        "embedder_model": _embedder_identity(embedder),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _build_source_fingerprint(
+    *,
+    project_id: str,
+    root_path: Path,
+    include_dirs: list[str],
+    exclude_globs: list[str],
+) -> str:
+    payload = {
+        "project_id": project_id,
+        "root_path": str(root_path),
+        "include_dirs": include_dirs,
+        "exclude_globs": exclude_globs,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _build_store_target_summary(dsn: str) -> dict[str, object]:
+    parsed = urlsplit(dsn)
+    database = parsed.path.lstrip("/") if parsed.path else ""
+    return {
+        "scheme": parsed.scheme or None,
+        "host": parsed.hostname or None,
+        "port": parsed.port,
+        "database": database or None,
+        "dsn_fingerprint": hashlib.sha256(dsn.encode("utf-8", errors="ignore")).hexdigest()[:12],
+    }
+
+
+def _embedder_identity(embedder: Embedder) -> str:
+    model_name = getattr(embedder, "model_name", None)
+    if model_name:
+        return str(model_name)
+    return embedder.__class__.__name__
 
 
 if __name__ == "__main__":
