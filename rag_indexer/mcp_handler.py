@@ -714,7 +714,10 @@ class MCPHandler:
         return mapping
 
     def _run_list_projects(self) -> dict[str, Any]:
-        projects = [project.to_public_dict() for project in self._project_registry.list_projects()]
+        projects = [
+            self._build_project_public_payload(project)
+            for project in self._project_registry.list_projects()
+        ]
         return {
             "count": len(projects),
             "multi_project_enabled": self._config.multi_project_enabled,
@@ -728,7 +731,7 @@ class MCPHandler:
         if not project_id:
             raise ValueError("'project_id' is required for get_project_info")
         project = self._project_registry.require_project(project_id)
-        return project.to_public_dict()
+        return self._build_project_public_payload(project)
 
     def get_operational_status(self, *, ready: bool) -> dict[str, Any]:
         projects = [
@@ -749,6 +752,7 @@ class MCPHandler:
         }
 
     def _build_project_status_summary(self, project) -> dict[str, Any]:
+        integrity = self._build_project_integrity(project)
         manifest = project.index_manifest.to_public_dict() if project.index_manifest is not None else None
         return {
             "project_id": project.project_id,
@@ -760,6 +764,130 @@ class MCPHandler:
             "index_version": project.index_version,
             "index_fingerprint": project.index_fingerprint,
             "index_manifest": manifest,
+            "integrity": integrity,
+        }
+
+    def _build_project_public_payload(self, project) -> dict[str, Any]:
+        payload = project.to_public_dict()
+        payload["integrity"] = self._build_project_integrity(project)
+        return payload
+
+    def _build_project_integrity(self, project) -> dict[str, Any]:
+        manifest = project.index_manifest
+        runtime_state = project.runtime_state
+        runtime_target = self._build_storage_target_summary()
+        reasons: list[str] = []
+        status = "ok"
+
+        runtime_status = str(runtime_state.last_ingest_status or "").strip().lower()
+        manifest_status = (
+            str(manifest.last_ingest_status or "").strip().lower()
+            if manifest is not None
+            else ""
+        )
+
+        runtime_has_index = bool(
+            runtime_state.index_version
+            or runtime_state.index_fingerprint
+            or runtime_state.last_successful_ingest_at
+            or runtime_status == "success"
+        )
+        manifest_has_index = bool(
+            manifest is not None
+            and (
+                manifest.index_version
+                or manifest.index_fingerprint
+                or manifest.last_ingest_completed_at
+                or manifest_status == "success"
+            )
+        )
+
+        if runtime_status == "running" or manifest_status == "running":
+            status = "indexing"
+
+        if runtime_status == "failed":
+            status = "unreliable"
+            reasons.append("runtime_state_reports_failed_ingest")
+        if manifest_status == "failed":
+            status = "unreliable"
+            reasons.append("index_manifest_reports_failed_ingest")
+        if manifest is not None and manifest.last_error:
+            status = "unreliable"
+            reasons.append("index_manifest_has_last_error")
+
+        if manifest is None:
+            if runtime_has_index:
+                status = "unreliable"
+                reasons.append("runtime_state_has_index_but_manifest_missing")
+            elif status != "indexing":
+                status = "not_indexed"
+                reasons.append("no_index_manifest_present")
+            return {
+                "status": status,
+                "reasons": reasons,
+                "runtime_status": runtime_state.last_ingest_status,
+                "manifest_status": None,
+                "store_target_match": None,
+            }
+
+        if runtime_status and manifest_status and runtime_status != manifest_status:
+            status = "stale"
+            reasons.append("runtime_and_manifest_status_mismatch")
+        if manifest_has_index and not runtime_has_index:
+            status = "stale"
+            reasons.append("index_manifest_has_index_but_runtime_state_is_missing")
+        if runtime_has_index and not manifest_has_index and status == "ok":
+            status = "stale"
+            reasons.append("runtime_state_has_index_but_manifest_is_incomplete")
+        if (
+            runtime_state.index_version
+            and manifest.index_version
+            and runtime_state.index_version != manifest.index_version
+        ):
+            status = "stale"
+            reasons.append("runtime_and_manifest_index_version_mismatch")
+        if (
+            runtime_state.index_fingerprint
+            and manifest.index_fingerprint
+            and runtime_state.index_fingerprint != manifest.index_fingerprint
+        ):
+            status = "stale"
+            reasons.append("runtime_and_manifest_index_fingerprint_mismatch")
+        if (
+            runtime_state.last_successful_ingest_at
+            and manifest.last_ingest_completed_at
+            and runtime_state.last_successful_ingest_at != manifest.last_ingest_completed_at
+        ):
+            status = "stale"
+            reasons.append("runtime_and_manifest_timestamp_mismatch")
+
+        manifest_target = manifest.store_target or {}
+        runtime_database = str(runtime_target.get("database") or "").strip().lower()
+        manifest_database = str(manifest_target.get("database") or "").strip().lower()
+        runtime_dsn_fingerprint = str(runtime_target.get("dsn_fingerprint") or "").strip()
+        manifest_dsn_fingerprint = str(manifest_target.get("dsn_fingerprint") or "").strip()
+        store_target_match: Optional[bool] = None
+        if runtime_database and manifest_database:
+            store_target_match = runtime_database == manifest_database
+        elif runtime_dsn_fingerprint and manifest_dsn_fingerprint:
+            store_target_match = runtime_dsn_fingerprint == manifest_dsn_fingerprint
+        if store_target_match is False:
+            status = "stale"
+            reasons.append("runtime_storage_target_differs_from_manifest")
+
+        if status == "ok" and not (runtime_has_index or manifest_has_index):
+            status = "not_indexed"
+            reasons.append("manifest_present_without_completed_index")
+
+        if status == "ok" and not reasons:
+            reasons.append("runtime_and_manifest_are_coherent")
+
+        return {
+            "status": status,
+            "reasons": reasons,
+            "runtime_status": runtime_state.last_ingest_status,
+            "manifest_status": manifest.last_ingest_status,
+            "store_target_match": store_target_match,
         }
 
     def _build_storage_target_summary(self) -> dict[str, Any]:
