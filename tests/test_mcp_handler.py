@@ -615,12 +615,22 @@ def _write_multi_project_config(tmp_path, *, multi_project_enabled=True, default
 
 def test_list_projects_returns_registered_projects(monkeypatch, no_warmup, tmp_path):
     handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    handler._project_registry.save_runtime_state(
+        "alpha",
+        last_ingest_status="success",
+        last_successful_ingest_at="2026-03-27T11:00:00Z",
+        index_version="v2",
+        index_fingerprint="idx-alpha",
+    )
     handler._project_registry.save_index_manifest(
         "alpha",
         {
             "index_version": "v2",
             "last_ingest_status": "success",
+            "last_ingest_completed_at": "2026-03-27T11:00:00Z",
             "indexed_documents": 6,
+            "index_fingerprint": "idx-alpha",
+            "store_target": {"database": "postgres", "dsn_fingerprint": "9c6fe00d4d62"},
         },
     )
 
@@ -629,6 +639,7 @@ def test_list_projects_returns_registered_projects(monkeypatch, no_warmup, tmp_p
     assert payload["count"] == 2
     assert payload["multi_project_enabled"] is True
     assert payload["projects"][0]["index_manifest"]["indexed_documents"] == 6
+    assert payload["projects"][0]["integrity"]["status"] == "ok"
 
 
 def test_map_work_item_to_codebase_returns_structured_mapping(monkeypatch, no_warmup, tmp_path):
@@ -740,16 +751,25 @@ def test_get_project_info_returns_registry_entry(monkeypatch, no_warmup, tmp_pat
 
 def test_get_project_info_exposes_index_manifest(monkeypatch, no_warmup, tmp_path):
     handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    handler._project_registry.save_runtime_state(
+        "alpha",
+        last_ingest_status="success",
+        last_successful_ingest_at="2026-03-27T10:30:00Z",
+        index_version="v2",
+        index_fingerprint="idx-alpha",
+    )
     handler._project_registry.save_index_manifest(
         "alpha",
         {
             "index_version": "v2",
             "schema_version": "v2",
             "last_ingest_status": "success",
+            "last_ingest_completed_at": "2026-03-27T10:30:00Z",
             "indexed_documents": 5,
             "indexed_chunks": 18,
             "indexed_symbols": 3,
-            "store_target": {"database": "llm_context_rework"},
+            "index_fingerprint": "idx-alpha",
+            "store_target": {"database": "postgres"},
         },
     )
 
@@ -758,6 +778,24 @@ def test_get_project_info_exposes_index_manifest(monkeypatch, no_warmup, tmp_pat
     assert payload["index_manifest"] is not None
     assert payload["index_manifest"]["present"] is True
     assert payload["index_manifest"]["indexed_chunks"] == 18
+    assert payload["integrity"]["status"] == "ok"
+
+
+def test_get_project_info_marks_missing_manifest_as_unreliable(monkeypatch, no_warmup, tmp_path):
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    handler._project_registry.save_runtime_state(
+        "alpha",
+        last_ingest_status="success",
+        last_successful_ingest_at="2026-03-27T12:00:00Z",
+        index_version="v2",
+        index_fingerprint="idx-alpha",
+    )
+
+    payload = handler._run_get_project_info({"project_id": "alpha"})
+
+    assert payload["index_manifest"] is None
+    assert payload["integrity"]["status"] == "unreliable"
+    assert "runtime_state_has_index_but_manifest_missing" in payload["integrity"]["reasons"]
 
 
 def test_multi_project_mode_requires_explicit_project_id(monkeypatch, no_warmup, tmp_path):
@@ -911,14 +949,23 @@ def test_rag_search_returns_raw_results_without_formatted_context(monkeypatch, n
 
 def test_context_operational_status_exposes_project_summary(monkeypatch, no_warmup, tmp_path):
     handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    handler._project_registry.save_runtime_state(
+        "alpha",
+        last_ingest_status="success",
+        last_successful_ingest_at="2026-03-27T11:00:00Z",
+        index_version="v2",
+        index_fingerprint="idx-alpha",
+    )
     handler._project_registry.save_index_manifest(
         "alpha",
         {
             "index_version": "v2",
             "last_ingest_status": "success",
+            "last_ingest_completed_at": "2026-03-27T11:00:00Z",
             "indexed_documents": 7,
             "indexed_chunks": 30,
             "indexed_symbols": 4,
+            "index_fingerprint": "idx-alpha",
         },
     )
 
@@ -932,6 +979,40 @@ def test_context_operational_status_exposes_project_summary(monkeypatch, no_warm
     assert payload["project_count"] == 2
     assert payload["projects"][0]["project_id"] == "alpha"
     assert payload["projects"][0]["index_manifest"]["indexed_documents"] == 7
+    assert payload["projects"][0]["integrity"]["status"] == "ok"
+
+
+def test_context_operational_status_marks_storage_target_mismatch_as_stale(
+    monkeypatch, no_warmup, tmp_path
+):
+    monkeypatch.setenv(
+        "LLM_CONTEXT_DSN",
+        "postgresql://ctx_user:ctx_pass@localhost:5432/llm_context_rework",
+    )
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    handler._project_registry.save_runtime_state(
+        "alpha",
+        last_ingest_status="success",
+        last_successful_ingest_at="2026-03-27T13:00:00Z",
+        index_version="v2",
+        index_fingerprint="idx-alpha",
+    )
+    handler._project_registry.save_index_manifest(
+        "alpha",
+        {
+            "index_version": "v2",
+            "last_ingest_status": "success",
+            "last_ingest_completed_at": "2026-03-27T13:00:00Z",
+            "index_fingerprint": "idx-alpha",
+            "store_target": {"database": "postgres"},
+        },
+    )
+
+    payload = handler.get_operational_status(ready=True)
+
+    assert payload["projects"][0]["integrity"]["status"] == "stale"
+    assert "runtime_storage_target_differs_from_manifest" in payload["projects"][0]["integrity"]["reasons"]
+    assert payload["projects"][0]["integrity"]["store_target_match"] is False
 
 
 def test_storage_target_summary_marks_dedicated_database(monkeypatch, no_warmup):
