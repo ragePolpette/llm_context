@@ -111,6 +111,26 @@ class RagStore:
             for row in rows
         ]
 
+    def get_repo_stats(self, repo_id: str) -> dict[str, int]:
+        sql_text = (
+            "SELECT "
+            "(SELECT COUNT(*) FROM documents d WHERE d.repo_id = @Valore0 AND d.deleted_at IS NULL) AS document_count, "
+            "(SELECT COUNT(*) FROM chunks c "
+            " JOIN documents d ON d.doc_id = c.doc_id "
+            " WHERE d.repo_id = @Valore0 AND d.deleted_at IS NULL) AS chunk_count, "
+            "(SELECT COUNT(*) FROM symbols s "
+            " JOIN documents d ON d.doc_id = s.doc_id "
+            " WHERE d.repo_id = @Valore0 AND d.deleted_at IS NULL) AS symbol_count"
+        )
+        with self.conn.cursor() as cur:
+            execute_params(cur, sql_text, [repo_id])
+            row = cur.fetchone()
+        return {
+            "indexed_documents": int(row[0] or 0),
+            "indexed_chunks": int(row[1] or 0),
+            "indexed_symbols": int(row[2] or 0),
+        }
+
     def upsert_document(self, record: DocumentRecord) -> uuid.UUID:
         sql_text = (
             "INSERT INTO documents ("

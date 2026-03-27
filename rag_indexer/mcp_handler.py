@@ -731,30 +731,35 @@ class MCPHandler:
         return project.to_public_dict()
 
     def get_operational_status(self, *, ready: bool) -> dict[str, Any]:
-        projects = []
-        for project in self._project_registry.list_projects():
-            projects.append(
-                {
-                    "project_id": project.project_id,
-                    "display_name": project.display_name,
-                    "ingest_enabled": project.ingest_enabled,
-                    "write_enabled": project.write_enabled,
-                    "last_ingest_status": project.last_ingest_status,
-                    "last_successful_ingest_at": project.last_successful_ingest_at,
-                    "index_version": project.index_version,
-                    "index_fingerprint": project.index_fingerprint,
-                }
-            )
+        projects = [
+            self._build_project_status_summary(project)
+            for project in self._project_registry.list_projects()
+        ]
         return {
             "status": "ready" if ready else "loading",
             "runtime_name": self._runtime_name,
             "config_path": self._config_path,
             "storage_target": self._build_storage_target_summary(),
+            "project_manifest_dir": str(self._project_registry.manifest_dir),
             "multi_project_enabled": self._config.multi_project_enabled,
             "ingest_enabled": self._config.ingest_enabled,
             "write_enabled": self._config.write_enabled,
             "project_count": len(projects),
             "projects": projects,
+        }
+
+    def _build_project_status_summary(self, project) -> dict[str, Any]:
+        manifest = project.index_manifest.to_public_dict() if project.index_manifest is not None else None
+        return {
+            "project_id": project.project_id,
+            "display_name": project.display_name,
+            "ingest_enabled": project.ingest_enabled,
+            "write_enabled": project.write_enabled,
+            "last_ingest_status": project.last_ingest_status,
+            "last_successful_ingest_at": project.last_successful_ingest_at,
+            "index_version": project.index_version,
+            "index_fingerprint": project.index_fingerprint,
+            "index_manifest": manifest,
         }
 
     def _build_storage_target_summary(self) -> dict[str, Any]:

@@ -133,9 +133,21 @@ def test_run_ingest_command_updates_project_runtime_state(monkeypatch, tmp_path)
         def close(self):
             return None
 
+    class FakeStore:
+        def __init__(self, conn, embedding_dim):
+            self.embedding_dim = embedding_dim
+
+        def get_repo_stats(self, repo_id):
+            assert repo_id == "alpha"
+            return {
+                "indexed_documents": 4,
+                "indexed_chunks": 8,
+                "indexed_symbols": 2,
+            }
+
     monkeypatch.setattr(cli, "_build_embedder", lambda *args, **kwargs: object())
     monkeypatch.setattr(cli, "get_connection", lambda dsn: FakeConn())
-    monkeypatch.setattr(cli, "RagStore", lambda conn, embedding_dim: object())
+    monkeypatch.setattr(cli, "RagStore", FakeStore)
     monkeypatch.setattr(
         cli,
         "ingest_project_v2",
@@ -183,3 +195,8 @@ def test_run_ingest_command_updates_project_runtime_state(monkeypatch, tmp_path)
     assert reloaded.last_ingest_status == "success"
     assert reloaded.last_successful_ingest_at is not None
     assert reloaded.index_version == "v2"
+    assert reloaded.index_manifest is not None
+    assert reloaded.index_manifest.last_ingest_status == "success"
+    assert reloaded.index_manifest.indexed_documents == 4
+    assert reloaded.index_manifest.indexed_chunks == 8
+    assert reloaded.index_manifest.indexed_symbols == 2

@@ -180,3 +180,93 @@ def test_project_registry_persists_runtime_state(tmp_path):
     reloaded = load_project_registry(registry_path, state_path).require_project("alpha")
     assert reloaded.last_successful_ingest_at == "2026-03-16T21:00:00Z"
     assert reloaded.index_fingerprint == "abc123"
+
+
+def test_project_registry_persists_index_manifest(tmp_path):
+    registry_path = tmp_path / "projects.yaml"
+    state_path = tmp_path / "projects.state.json"
+    registry_path.write_text(
+        yaml.safe_dump(
+            {
+                "projects": [
+                    {
+                        "project_id": "alpha",
+                        "display_name": "Alpha",
+                        "root_path": "repos/alpha",
+                        "ingest_enabled": True,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry = load_project_registry(registry_path, state_path)
+    updated = registry.save_index_manifest(
+        "alpha",
+        {
+            "index_version": "v2",
+            "schema_version": "v2",
+            "last_ingest_status": "success",
+            "indexed_documents": 12,
+            "indexed_chunks": 48,
+            "indexed_symbols": 9,
+            "index_fingerprint": "idx-001",
+            "config_fingerprint": "cfg-001",
+            "source_fingerprint": "src-001",
+            "store_target": {"database": "llm_context_rework"},
+            "embedder_model": "LocalHashEmbedder",
+        },
+    )
+
+    assert updated.index_manifest is not None
+    assert updated.index_manifest.present is True
+    assert updated.index_manifest.indexed_documents == 12
+    assert updated.index_manifest.store_target["database"] == "llm_context_rework"
+
+    reloaded = load_project_registry(registry_path, state_path).require_project("alpha")
+    assert reloaded.index_manifest is not None
+    assert reloaded.index_manifest.index_fingerprint == "idx-001"
+    assert reloaded.to_public_dict()["index_manifest"]["indexed_chunks"] == 48
+
+
+def test_project_registry_merges_existing_index_manifest_fields(tmp_path):
+    registry_path = tmp_path / "projects.yaml"
+    state_path = tmp_path / "projects.state.json"
+    registry_path.write_text(
+        yaml.safe_dump(
+            {
+                "projects": [
+                    {
+                        "project_id": "alpha",
+                        "display_name": "Alpha",
+                        "root_path": "repos/alpha",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry = load_project_registry(registry_path, state_path)
+    registry.save_index_manifest(
+        "alpha",
+        {
+            "index_version": "v2",
+            "last_ingest_started_at": "2026-03-27T10:00:00Z",
+            "config_fingerprint": "cfg-001",
+        },
+    )
+    updated = registry.save_index_manifest(
+        "alpha",
+        {
+            "last_ingest_status": "failed",
+            "last_error": "boom",
+        },
+    )
+
+    assert updated.index_manifest is not None
+    assert updated.index_manifest.index_version == "v2"
+    assert updated.index_manifest.last_ingest_started_at == "2026-03-27T10:00:00Z"
+    assert updated.index_manifest.last_ingest_status == "failed"
+    assert updated.index_manifest.last_error == "boom"
