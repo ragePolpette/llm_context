@@ -329,6 +329,9 @@ def test_context_info_exposes_tool_map_and_usage_notes(no_warmup):
     assert payload["config_path"].endswith("config.yaml")
     assert payload["storage_target"]["database"] == "postgres"
     assert payload["storage_target"]["dedicated_candidate"] is False
+    assert "runtime_readiness" in payload
+    assert payload["runtime_readiness"]["status"] in {"degraded", "blocked", "ready"}
+    assert "recommended_actions" in payload["runtime_readiness"]
     assert "tool_map" in payload
     assert "tool_roles" in payload
     assert "quick_start" in payload
@@ -390,6 +393,14 @@ def test_format_tool_text_formats_context_info_as_decision_guide():
             "runtime_name": "rework",
             "multi_project_enabled": True,
             "default_project_id": "llm_context_rework",
+            "runtime_readiness": {
+                "status": "blocked",
+                "ready_for_queries": False,
+                "summary": "Runtime non pronto: nessun progetto con integrity=ok.",
+                "blocking_reasons": ["no_project_with_integrity_ok"],
+                "warnings": ["registered_projects_are_not_indexed"],
+                "recommended_actions": ["Eseguire ingest sul progetto registrato."],
+            },
             "quick_start": [
                 {"step": "1", "tool": "context_info", "reason": "scegli il flusso corretto"}
             ],
@@ -408,6 +419,9 @@ def test_format_tool_text_formats_context_info_as_decision_guide():
     )
 
     assert "CONTEXT INFO" in text
+    assert "RUNTIME READINESS" in text
+    assert "status: blocked ready_for_queries=false" in text
+    assert "blocker: no_project_with_integrity_ok" in text
     assert "QUICK START" in text
     assert "DECISION GUIDE" in text
     assert "ANTI-PATTERNS" in text
@@ -1013,6 +1027,79 @@ def test_context_operational_status_marks_storage_target_mismatch_as_stale(
     assert payload["projects"][0]["integrity"]["status"] == "stale"
     assert "runtime_storage_target_differs_from_manifest" in payload["projects"][0]["integrity"]["reasons"]
     assert payload["projects"][0]["integrity"]["store_target_match"] is False
+    assert payload["runtime_readiness"]["status"] == "blocked"
+    assert "registered_projects_have_stale_index_state" in payload["runtime_readiness"]["warnings"]
+
+
+def test_context_operational_status_marks_runtime_readiness_ready(
+    monkeypatch, no_warmup, tmp_path
+):
+    monkeypatch.setenv(
+        "LLM_CONTEXT_DSN",
+        "postgresql://ctx_user:ctx_pass@localhost:5432/llm_context_rework",
+    )
+    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "rework-local-pg")
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    handler._project_registry.save_runtime_state(
+        "alpha",
+        last_ingest_status="success",
+        last_successful_ingest_at="2026-03-27T13:00:00Z",
+        index_version="v2",
+        index_fingerprint="idx-alpha",
+    )
+    handler._project_registry.save_index_manifest(
+        "alpha",
+        {
+            "index_version": "v2",
+            "last_ingest_status": "success",
+            "last_ingest_completed_at": "2026-03-27T13:00:00Z",
+            "index_fingerprint": "idx-alpha",
+            "store_target": {
+                "name": "rework-local-pg",
+                "database": "llm_context_rework",
+            },
+        },
+    )
+    handler._project_registry.save_runtime_state(
+        "beta",
+        last_ingest_status="success",
+        last_successful_ingest_at="2026-03-27T13:00:00Z",
+        index_version="v2",
+        index_fingerprint="idx-beta",
+    )
+    handler._project_registry.save_index_manifest(
+        "beta",
+        {
+            "index_version": "v2",
+            "last_ingest_status": "success",
+            "last_ingest_completed_at": "2026-03-27T13:00:00Z",
+            "index_fingerprint": "idx-beta",
+            "store_target": {
+                "name": "rework-local-pg",
+                "database": "llm_context_rework",
+            },
+        },
+    )
+
+    payload = handler.get_operational_status(ready=True)
+
+    assert payload["runtime_readiness"]["status"] == "ready"
+    assert payload["runtime_readiness"]["ready_for_queries"] is True
+    assert payload["runtime_readiness"]["queryable_projects"] == ["alpha", "beta"]
+    assert payload["runtime_readiness"]["project_integrity_counts"]["ok"] == 2
+
+
+def test_context_operational_status_marks_not_indexed_projects_as_blocked(
+    monkeypatch, no_warmup, tmp_path
+):
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+
+    payload = handler.get_operational_status(ready=True)
+
+    assert payload["runtime_readiness"]["status"] == "blocked"
+    assert payload["runtime_readiness"]["ready_for_queries"] is False
+    assert "no_project_with_integrity_ok" in payload["runtime_readiness"]["blocking_reasons"]
+    assert "registered_projects_are_not_indexed" in payload["runtime_readiness"]["warnings"]
 
 
 def test_storage_target_summary_marks_dedicated_database(monkeypatch, no_warmup):

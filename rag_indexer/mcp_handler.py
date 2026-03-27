@@ -461,11 +461,13 @@ class MCPHandler:
 
     def _run_context_info(self) -> dict[str, Any]:
         """Describe scope and boundaries of llm-context MCP."""
+        runtime_readiness = self._build_runtime_readiness(ready=self._ready.is_set())
         return {
             "server": "llm-context-mcp",
             "runtime_name": self._runtime_name,
             "config_path": self._config_path,
             "storage_target": self._build_storage_target_summary(),
+            "runtime_readiness": runtime_readiness,
             "purpose": "Recupero contesto da codice/documenti indicizzati (RAG).",
             "multi_project_enabled": self._config.multi_project_enabled,
             "write_enabled": self._config.write_enabled,
@@ -738,11 +740,16 @@ class MCPHandler:
             self._build_project_status_summary(project)
             for project in self._project_registry.list_projects()
         ]
+        runtime_readiness = self._build_runtime_readiness(
+            ready=ready,
+            project_summaries=projects,
+        )
         return {
             "status": "ready" if ready else "loading",
             "runtime_name": self._runtime_name,
             "config_path": self._config_path,
             "storage_target": self._build_storage_target_summary(),
+            "runtime_readiness": runtime_readiness,
             "project_manifest_dir": str(self._project_registry.manifest_dir),
             "multi_project_enabled": self._config.multi_project_enabled,
             "ingest_enabled": self._config.ingest_enabled,
@@ -771,6 +778,201 @@ class MCPHandler:
         payload = project.to_public_dict()
         payload["integrity"] = self._build_project_integrity(project)
         return payload
+
+    def _build_runtime_readiness(
+        self,
+        *,
+        ready: bool,
+        project_summaries: Optional[list[dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
+        if project_summaries is None:
+            project_summaries = [
+                self._build_project_status_summary(project)
+                for project in self._project_registry.list_projects()
+            ]
+
+        warnings: list[str] = []
+        blockers: list[str] = []
+        recommended_actions: list[str] = []
+        storage_target = self._build_storage_target_summary()
+
+        def add_warning(value: str) -> None:
+            if value and value not in warnings:
+                warnings.append(value)
+
+        def add_blocker(value: str) -> None:
+            if value and value not in blockers:
+                blockers.append(value)
+
+        def add_action(value: str) -> None:
+            if value and value not in recommended_actions:
+                recommended_actions.append(value)
+
+        checks: list[dict[str, Any]] = [
+            {
+                "name": "embedder_warmup",
+                "status": "ok" if ready else "pending",
+                "detail": (
+                    "Embedder warmup completato."
+                    if ready
+                    else "Embedder warmup ancora in corso."
+                ),
+            }
+        ]
+        if not ready:
+            add_blocker("embedder_warmup_in_progress")
+            add_action("Attendere il completamento del warmup embedder prima di usare rag_context.")
+
+        dedicated_candidate = bool(storage_target.get("dedicated_candidate"))
+        checks.append(
+            {
+                "name": "storage_target",
+                "status": "ok" if dedicated_candidate else "warning",
+                "detail": (
+                    "Storage target dedicato al runtime."
+                    if dedicated_candidate
+                    else "Storage target non chiaramente dedicato al runtime."
+                ),
+            }
+        )
+        if not dedicated_candidate:
+            add_warning("storage_target_is_not_clearly_dedicated")
+            add_action("Usare un database dedicato al rework per evitare ambiguita' con il live.")
+
+        project_count = len(project_summaries)
+        registry_ready = project_count > 0
+        if self._config.multi_project_enabled:
+            registry_status = "ok" if registry_ready else "error"
+            registry_detail = (
+                f"{project_count} progetti registrati."
+                if registry_ready
+                else "Nessun progetto registrato in multi-project mode."
+            )
+        else:
+            has_safe_default = bool(self._default_project_id)
+            registry_status = "ok" if (registry_ready or has_safe_default) else "error"
+            registry_detail = (
+                f"{project_count} progetti registrati."
+                if registry_ready
+                else (
+                    f"Nessun progetto registrato; fallback sul default_project_id '{self._default_project_id}'."
+                    if has_safe_default
+                    else "Nessun progetto registrato e nessun default_project_id configurato."
+                )
+            )
+        checks.append(
+            {
+                "name": "project_registry",
+                "status": registry_status,
+                "detail": registry_detail,
+            }
+        )
+        if self._config.multi_project_enabled and not registry_ready:
+            add_blocker("no_registered_projects_in_multi_project_mode")
+            add_action("Registrare almeno un progetto nel registry prima di usare il read-plane.")
+        elif not self._config.multi_project_enabled and not registry_ready:
+            if self._default_project_id:
+                add_warning("no_registered_projects_using_default_project_fallback")
+                add_action(
+                    f"Verificare che il default_project_id '{self._default_project_id}' abbia un indice coerente."
+                )
+            else:
+                add_blocker("no_registered_projects_and_no_default_project")
+                add_action("Configurare un default_project_id oppure aggiungere un progetto al registry.")
+
+        integrity_counts: dict[str, int] = {}
+        queryable_projects: list[str] = []
+        indexing_projects: list[str] = []
+        for item in project_summaries:
+            integrity = item.get("integrity") or {}
+            integrity_status = str(integrity.get("status") or "unknown").strip() or "unknown"
+            integrity_counts[integrity_status] = integrity_counts.get(integrity_status, 0) + 1
+            project_id = str(item.get("project_id") or "").strip()
+            if integrity_status == "ok" and project_id:
+                queryable_projects.append(project_id)
+            elif integrity_status == "indexing" and project_id:
+                indexing_projects.append(project_id)
+
+        if queryable_projects:
+            indexed_status = "ok"
+            indexed_detail = (
+                "Progetti interrogabili: " + ", ".join(queryable_projects[:5])
+            )
+        elif indexing_projects:
+            indexed_status = "warning"
+            indexed_detail = (
+                "Ingest in corso senza un progetto ancora coerente: "
+                + ", ".join(indexing_projects[:5])
+            )
+        elif project_count == 0 and not self._config.multi_project_enabled and self._default_project_id:
+            indexed_status = "warning"
+            indexed_detail = (
+                "Nessun progetto verificabile nel registry; il runtime puo' usare solo il default project."
+            )
+        else:
+            indexed_status = "error"
+            indexed_detail = "Nessun progetto attualmente interrogabile."
+        checks.append(
+            {
+                "name": "indexed_projects",
+                "status": indexed_status,
+                "detail": indexed_detail,
+                "integrity_counts": integrity_counts,
+            }
+        )
+
+        if integrity_counts.get("indexing"):
+            add_warning("ingest_in_progress_without_stable_project")
+            add_action("Attendere la fine dell'ingest prima di considerare stabile il runtime.")
+        if integrity_counts.get("not_indexed"):
+            add_warning("registered_projects_are_not_indexed")
+            add_action("Eseguire ingest sui progetti registrati prima di usare il runtime in produzione.")
+        if integrity_counts.get("stale"):
+            add_warning("registered_projects_have_stale_index_state")
+            add_action("Allineare runtime state e manifest o rieseguire ingest sui progetti stale.")
+        if integrity_counts.get("unreliable"):
+            add_warning("registered_projects_have_unreliable_index_state")
+            add_action("Correggere errori di ingest o manifest prima di fidarsi dei risultati.")
+
+        if project_count > 0 and not queryable_projects and not indexing_projects:
+            add_blocker("no_project_with_integrity_ok")
+
+        ready_for_queries = ready and bool(queryable_projects)
+        if blockers:
+            status = "degraded" if ready_for_queries else "blocked"
+        elif warnings:
+            status = "degraded" if ready else "blocked"
+        elif ready_for_queries:
+            status = "ready"
+        else:
+            status = "blocked"
+
+        if ready_for_queries and status == "ready":
+            summary = (
+                f"Runtime pronto: {len(queryable_projects)} progetto/i coerente/i interrogabile/i."
+            )
+        elif ready_for_queries:
+            summary = (
+                f"Runtime interrogabile ma con segnali da verificare: {len(queryable_projects)} progetto/i coerente/i."
+            )
+        elif indexing_projects:
+            summary = "Runtime avviato ma ancora in attesa di un progetto coerente dopo l'ingest."
+        elif project_count == 0:
+            summary = "Runtime avviato ma senza un progetto verificabile pronto per il read-plane."
+        else:
+            summary = "Runtime non pronto: nessun progetto con integrity=ok."
+
+        return {
+            "status": status,
+            "ready_for_queries": ready_for_queries,
+            "summary": summary,
+            "checks": checks,
+            "project_integrity_counts": integrity_counts,
+            "queryable_projects": queryable_projects,
+            "blocking_reasons": blockers,
+            "warnings": warnings,
+            "recommended_actions": recommended_actions,
+        }
 
     def _build_project_integrity(self, project) -> dict[str, Any]:
         manifest = project.index_manifest
@@ -1508,6 +1710,24 @@ def format_context_info_text(payload: dict[str, Any]) -> str:
         f"default_project_id: {payload.get('default_project_id') or '(none)'}",
         "",
     ]
+
+    runtime_readiness = payload.get("runtime_readiness") or {}
+    if runtime_readiness:
+        lines.append("RUNTIME READINESS")
+        lines.append(
+            f"- status: {runtime_readiness.get('status') or 'unknown'} "
+            f"ready_for_queries={str(bool(runtime_readiness.get('ready_for_queries'))).lower()}"
+        )
+        summary = runtime_readiness.get("summary") or ""
+        if summary:
+            lines.append(f"- summary: {summary}")
+        for item in runtime_readiness.get("blocking_reasons") or []:
+            lines.append(f"- blocker: {item}")
+        for item in runtime_readiness.get("warnings") or []:
+            lines.append(f"- warning: {item}")
+        for item in (runtime_readiness.get("recommended_actions") or [])[:5]:
+            lines.append(f"- action: {item}")
+        lines.append("")
 
     quick_start = payload.get("quick_start") or []
     if quick_start:
