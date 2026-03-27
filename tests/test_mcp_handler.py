@@ -615,11 +615,20 @@ def _write_multi_project_config(tmp_path, *, multi_project_enabled=True, default
 
 def test_list_projects_returns_registered_projects(monkeypatch, no_warmup, tmp_path):
     handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    handler._project_registry.save_index_manifest(
+        "alpha",
+        {
+            "index_version": "v2",
+            "last_ingest_status": "success",
+            "indexed_documents": 6,
+        },
+    )
 
     payload = handler._run_list_projects()
 
     assert payload["count"] == 2
     assert payload["multi_project_enabled"] is True
+    assert payload["projects"][0]["index_manifest"]["indexed_documents"] == 6
 
 
 def test_map_work_item_to_codebase_returns_structured_mapping(monkeypatch, no_warmup, tmp_path):
@@ -727,6 +736,28 @@ def test_get_project_info_returns_registry_entry(monkeypatch, no_warmup, tmp_pat
     assert payload["project_id"] == "alpha"
     assert payload["display_name"] == "Alpha"
     assert payload["ingest_enabled"] is True
+
+
+def test_get_project_info_exposes_index_manifest(monkeypatch, no_warmup, tmp_path):
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    handler._project_registry.save_index_manifest(
+        "alpha",
+        {
+            "index_version": "v2",
+            "schema_version": "v2",
+            "last_ingest_status": "success",
+            "indexed_documents": 5,
+            "indexed_chunks": 18,
+            "indexed_symbols": 3,
+            "store_target": {"database": "llm_context_rework"},
+        },
+    )
+
+    payload = handler._run_get_project_info({"project_id": "alpha"})
+
+    assert payload["index_manifest"] is not None
+    assert payload["index_manifest"]["present"] is True
+    assert payload["index_manifest"]["indexed_chunks"] == 18
 
 
 def test_multi_project_mode_requires_explicit_project_id(monkeypatch, no_warmup, tmp_path):
@@ -880,15 +911,27 @@ def test_rag_search_returns_raw_results_without_formatted_context(monkeypatch, n
 
 def test_context_operational_status_exposes_project_summary(monkeypatch, no_warmup, tmp_path):
     handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    handler._project_registry.save_index_manifest(
+        "alpha",
+        {
+            "index_version": "v2",
+            "last_ingest_status": "success",
+            "indexed_documents": 7,
+            "indexed_chunks": 30,
+            "indexed_symbols": 4,
+        },
+    )
 
     payload = handler.get_operational_status(ready=True)
 
     assert payload["status"] == "ready"
     assert payload["runtime_name"] == "default"
     assert payload["storage_target"]["database"] == "postgres"
+    assert payload["project_manifest_dir"].endswith("project_manifests")
     assert payload["multi_project_enabled"] is True
     assert payload["project_count"] == 2
     assert payload["projects"][0]["project_id"] == "alpha"
+    assert payload["projects"][0]["index_manifest"]["indexed_documents"] == 7
 
 
 def test_storage_target_summary_marks_dedicated_database(monkeypatch, no_warmup):
