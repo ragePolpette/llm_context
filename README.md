@@ -119,6 +119,7 @@ Questo modello e' pensato per essere schedulato esternamente senza esporre l'ing
 L'endpoint `/health` espone ora anche stato operativo utile per la dashboard esterna:
 
 - `status`
+- `database_runtime` con reachability del DSN, presenza `pgvector` e verifica schema v2
 - `runtime_readiness` con verdetto sintetico (`ready`, `degraded`, `blocked`), reasoning e azioni consigliate
 - `multi_project_enabled`
 - `ingest_enabled`
@@ -128,6 +129,11 @@ L'endpoint `/health` espone ora anche stato operativo utile per la dashboard est
 - `project_manifest_dir`
 - riepilogo manifest per progetto con conteggi indice e ultimo stato ingest
 - stato `integrity` per progetto (`ok`, `indexing`, `not_indexed`, `stale`, `unreliable`) con motivi espliciti
+
+Nel modello "bring your own PostgreSQL", la readiness non si limita piu' allo stato logico dei progetti:
+- verifica che il database configurato via `LLM_CONTEXT_DSN` sia raggiungibile
+- verifica che l'estensione `pgvector` sia installata
+- verifica che lo schema v2 (`documents`, `chunks`, `chunk_embeddings`, `index_runs`, `symbols`) sia presente
 
 ## Spiegazione teorica (cosa abbiamo fatto e perche')
 
