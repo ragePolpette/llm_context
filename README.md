@@ -119,6 +119,7 @@ Questo modello e' pensato per essere schedulato esternamente senza esporre l'ing
 L'endpoint `/health` espone ora anche stato operativo utile per la dashboard esterna:
 
 - `status`
+- `runtime_readiness` con verdetto sintetico (`ready`, `degraded`, `blocked`), reasoning e azioni consigliate
 - `multi_project_enabled`
 - `ingest_enabled`
 - `write_enabled`
