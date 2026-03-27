@@ -134,6 +134,15 @@ Nel modello "bring your own PostgreSQL", la readiness non si limita piu' allo st
 - verifica che il database configurato via `LLM_CONTEXT_DSN` sia raggiungibile
 - verifica che l'estensione `pgvector` sia installata
 - verifica che lo schema v2 (`documents`, `chunks`, `chunk_embeddings`, `index_runs`, `symbols`) sia presente
+- classifica il target DSN con `network_scope` / `deployment_hint` per distinguere meglio:
+  - loopback locale o Docker con port mapping
+  - alias Docker/interna tipo `host.docker.internal`
+  - Postgres remoto o managed
+
+Le `recommended_actions` di `runtime_readiness` usano questi hint per dare runbook piu' specifici al dashboard:
+- check locale o container con port mapping se il DSN punta a `localhost` / `127.0.0.1`
+- check rete Docker se il DSN usa alias container/host Docker
+- check rete, firewall/VPN e `sslmode` se il DSN punta a Postgres remoto o cloud
 
 ## Spiegazione teorica (cosa abbiamo fatto e perche')
 
