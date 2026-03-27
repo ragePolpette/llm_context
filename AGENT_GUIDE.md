@@ -14,6 +14,7 @@ Nota operativa:
 - il servizio MCP gira come processo Python normale
 - Docker non e' richiesto per il servizio
 - se il database e' in Docker e' una scelta di provisioning del DB, non del MCP
+- l'agente non deve assumere `localhost:5432` o un container specifico; deve usare il DSN runtime fornito dal launcher o dalla dashboard
 
 ## Surface MCP consigliato
 
@@ -32,7 +33,7 @@ Usa l'helper `rag_indexer/agent_context.py` che incapsula retrieval + formattazi
 from rag_indexer.agent_context import build_context
 from rag_indexer.embedder import LocalSentenceTransformerEmbedder
 
-DSN = "postgresql://<user>:<password>@localhost:5432/postgres"
+DSN = "postgresql://<user>:<password>@<host>:5432/<database>"
 PROJECT_ID = "myproj"
 embedder = LocalSentenceTransformerEmbedder(
     model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
@@ -68,7 +69,7 @@ direttamente il testo da inserire nel prompt:
 
 ```bash
 python cli.py context \
-  --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
+  --dsn "postgresql://<user>:<password>@<host>:5432/<database>" \
   --project-id myproj \
   --text "come funziona bpofh?" \
   --top-k 8 \
@@ -84,7 +85,7 @@ Oppure usa direttamente un file/dir:
 
 ```bash
 python cli.py context \
-  --dsn "postgresql://<user>:<password>@localhost:5432/postgres" \
+  --dsn "postgresql://<user>:<password>@<host>:5432/<database>" \
   --project-id myproj \
   --text "spiegami il flusso" \
   --top-k 8 \
@@ -106,7 +107,7 @@ Se vuoi gestire tu l'embedding e la query:
 import psycopg
 from rag_indexer.embedder import LocalSentenceTransformerEmbedder
 
-DSN = "postgresql://<user>:<password>@localhost:5432/postgres"
+DSN = "postgresql://<user>:<password>@<host>:5432/<database>"
 PROJECT_ID = "myproj"
 embedder = LocalSentenceTransformerEmbedder(
     model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"

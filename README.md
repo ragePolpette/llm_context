@@ -245,22 +245,26 @@ Riduce tempi di ingest e mantiene consistenza senza full reindex.
 - PostgreSQL con estensione `pgvector` disponibile in locale o su rete interna
 - Connessione Internet solo per scaricare i pesi del modello locale al primo avvio
 
-## Database: modello operativo non-Docker
+## Database: bring your own PostgreSQL
 
 Il processo `llm-context` deve essere gestito come gli altri MCP:
 
 - processo Python normale
 - start/stop da dashboard o script locali
+- database collegato a runtime
 - DSN passato via env/runtime
 
-Il database puo' essere:
+Il servizio **non provisiona** il database e non assume un modello infrastrutturale specifico.
+Il prodotto da esporre e' quindi: `collega il tuo PostgreSQL`.
 
-- un PostgreSQL locale installato sulla macchina
-- un PostgreSQL interno gia' esistente
-- opzionalmente un container Docker, ma **solo come scelta di provisioning del DB**
+Modalita' supportate:
 
-Docker quindi non fa piu' parte del modello operativo del servizio.
-Il target del rework e' `non-Docker first`.
+- PostgreSQL locale installato sulla macchina
+- PostgreSQL interno o remoto/cloud
+- PostgreSQL in Docker, ma **solo come scelta di provisioning del DB**
+
+Docker quindi resta opzionale e non fa parte del contratto operativo del servizio.
+Il runtime MCP vede solo un DSN PostgreSQL valido.
 
 ## Database locale: requisiti minimi
 
@@ -273,8 +277,28 @@ Serve un PostgreSQL raggiungibile dal DSN e con:
 Esempio DSN:
 
 ```bash
-postgresql://<user>:<password>@localhost:5432/postgres
+postgresql://<user>:<password>@<host>:5432/<database>
 ```
+
+## Credenziali e segreti
+
+Le credenziali DB devono essere fornite **solo a runtime**:
+
+- dal PowerShell di lancio
+- oppure dal `mcp-dashboard`
+
+Regole operative:
+
+- nessun `.env`
+- nessun DSN in `config.yaml` o `config.rework.yaml`
+- nessuna credenziale persistita nel repo
+- `/health` e `context_info` possono esporre solo dati safe come `host`, `database` e `dsn_fingerprint`
+
+Nel dashboard la configurazione corretta e':
+
+- un'opzione secret `LLM_CONTEXT_DSN`
+- opzioni non secret per `LLM_CONTEXT_CONFIG_PATH`, `LLM_CONTEXT_RUNTIME_NAME`, `MCP_PORT`
+- opzionalmente `LLM_CONTEXT_EMBEDDER` e `LLM_CONTEXT_STORE_TARGET`
 
 ## Installazione dipendenze
 
@@ -398,12 +422,12 @@ keyword_weight: 0.3
 
 Attenzione: questo cancella tutto l'indice esistente.
 
-Il DB puo' essere locale o interno; Docker non e' richiesto per il servizio.
-Se usi un PostgreSQL installato localmente o remoto via DSN, esegui i comandi equivalenti con `psql`.
+Il DB puo' essere locale, remoto/cloud o in Docker; il servizio MCP non cambia.
+Usa sempre il DSN del database che hai collegato al runtime.
 
 ```bash
-docker exec -it pgvector psql -U postgres -d postgres -c "DROP TABLE IF EXISTS chunk_embeddings; DROP TABLE IF EXISTS chunks; DROP TABLE IF EXISTS documents;"
-python cli.py init-db-v2 --dsn "postgresql://<user>:<password>@localhost:5432/postgres" --embedding-dim 384
+psql "postgresql://<user>:<password>@<host>:5432/<database>" -c "DROP TABLE IF EXISTS chunk_embeddings; DROP TABLE IF EXISTS chunks; DROP TABLE IF EXISTS documents;"
+python cli.py init-db-v2 --dsn "postgresql://<user>:<password>@<host>:5432/<database>" --embedding-dim 384
 ```
 
 ## Avvio del runtime rework
@@ -414,10 +438,17 @@ Per avviare il rework come servizio separato:
 2. opzionalmente imposta `MCP_PORT` e `LLM_CONTEXT_RUNTIME_NAME`
 3. avvia `scripts/start_http_server_rework.bat`
 
+Se il servizio e' orchestrato dal dashboard, il comportamento corretto e':
+
+- il dashboard passa il `LLM_CONTEXT_DSN` come segreto runtime
+- il dashboard passa `LLM_CONTEXT_CONFIG_PATH=config.rework.yaml`
+- il dashboard passa `MCP_PORT=8766`
+- il rework parte senza assumere nulla su Docker, localhost o provisioning del DB
+
 Esempio PowerShell:
 
 ```powershell
-$env:LLM_CONTEXT_DSN = "postgresql://<user>:<password>@localhost:5432/llm_context_rework"
+$env:LLM_CONTEXT_DSN = "postgresql://<user>:<password>@<host>:5432/<database>"
 $env:MCP_PORT = "8766"
 $env:LLM_CONTEXT_RUNTIME_NAME = "rework"
 .\scripts\start_http_server_rework.bat
