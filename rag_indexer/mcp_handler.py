@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import ipaddress
 import os
 import re
 import sys
@@ -473,7 +474,9 @@ class MCPHandler:
 
     def _run_context_info(self) -> dict[str, Any]:
         """Describe scope and boundaries of llm-context MCP."""
-        database_runtime = self._get_database_runtime_summary()
+        database_runtime = self._augment_database_runtime_summary(
+            self._get_database_runtime_summary()
+        )
         runtime_readiness = self._build_runtime_readiness(
             ready=self._ready.is_set(),
             database_runtime=database_runtime,
@@ -757,7 +760,9 @@ class MCPHandler:
             self._build_project_status_summary(project)
             for project in self._project_registry.list_projects()
         ]
-        database_runtime = self._get_database_runtime_summary()
+        database_runtime = self._augment_database_runtime_summary(
+            self._get_database_runtime_summary()
+        )
         runtime_readiness = self._build_runtime_readiness(
             ready=ready,
             project_summaries=projects,
@@ -813,6 +818,7 @@ class MCPHandler:
             ]
         if database_runtime is None:
             database_runtime = self._get_database_runtime_summary()
+        database_runtime = self._augment_database_runtime_summary(database_runtime)
 
         warnings: list[str] = []
         blockers: list[str] = []
@@ -847,6 +853,7 @@ class MCPHandler:
             add_action("Attendere il completamento del warmup embedder prima di usare rag_context.")
 
         dedicated_candidate = bool(storage_target.get("dedicated_candidate"))
+        deployment_hint = str(storage_target.get("deployment_hint") or "").strip() or "unknown"
         checks.append(
             {
                 "name": "storage_target",
@@ -881,9 +888,7 @@ class MCPHandler:
         )
         if not database_reachable:
             add_blocker("database_unreachable")
-            add_action(
-                "Verificare LLM_CONTEXT_DSN, credenziali runtime e reachability del database PostgreSQL."
-            )
+            add_action(_database_unreachable_action(deployment_hint))
 
         pgvector_available = database_runtime.get("pgvector_available")
         checks.append(
@@ -907,9 +912,7 @@ class MCPHandler:
         )
         if database_reachable and pgvector_available is not True:
             add_blocker("pgvector_extension_missing")
-            add_action(
-                "Installare l'estensione pgvector sul database target prima di usare il runtime."
-            )
+            add_action(_pgvector_missing_action(deployment_hint))
 
         schema_ready = database_runtime.get("schema_ready")
         required_tables = database_runtime.get("required_tables") or {}
@@ -940,7 +943,7 @@ class MCPHandler:
         )
         if database_reachable and schema_ready is not True:
             add_blocker("database_schema_not_initialized")
-            add_action("Eseguire init-db-v2 sul database target prima di usare il read-plane.")
+            add_action(_schema_missing_action(deployment_hint))
 
         project_count = len(project_summaries)
         registry_ready = project_count > 0
@@ -1197,6 +1200,7 @@ class MCPHandler:
 
     def _build_storage_target_summary(self) -> dict[str, Any]:
         parsed = urlsplit(self._default_dsn)
+        host = parsed.hostname or None
         database = parsed.path.lstrip("/") if parsed.path else ""
         database = database or None
         fingerprint = hashlib.sha256(
@@ -1205,14 +1209,17 @@ class MCPHandler:
         dedicated_candidate = True
         if not database or database.lower() in {"postgres", "template0", "template1"}:
             dedicated_candidate = False
+        network_scope, deployment_hint = _classify_database_target(host)
         return {
             "name": self._store_target_name,
             "scheme": parsed.scheme or None,
-            "host": parsed.hostname or None,
+            "host": host,
             "port": parsed.port,
             "database": database,
             "dsn_fingerprint": fingerprint,
             "dedicated_candidate": dedicated_candidate,
+            "network_scope": network_scope,
+            "deployment_hint": deployment_hint,
         }
 
     def _get_database_runtime_summary(self, *, refresh: bool = False) -> dict[str, Any]:
@@ -1229,10 +1236,24 @@ class MCPHandler:
             self._default_dsn,
             connect_timeout=self._db_connect_timeout_seconds,
         )
+        target_summary = self._build_storage_target_summary()
+        runtime["host"] = target_summary.get("host")
+        runtime["port"] = target_summary.get("port")
+        runtime["network_scope"] = target_summary.get("network_scope")
+        runtime["deployment_hint"] = target_summary.get("deployment_hint")
         with self._db_probe_lock:
             self._db_probe_cache = dict(runtime)
             self._db_probe_cache_at = now
         return dict(runtime)
+
+    def _augment_database_runtime_summary(self, runtime: Optional[dict[str, Any]]) -> dict[str, Any]:
+        payload = dict(runtime or {})
+        target_summary = self._build_storage_target_summary()
+        payload.setdefault("host", target_summary.get("host"))
+        payload.setdefault("port", target_summary.get("port"))
+        payload.setdefault("network_scope", target_summary.get("network_scope"))
+        payload.setdefault("deployment_hint", target_summary.get("deployment_hint"))
+        return payload
 
     def _resolve_project_id(self, args: dict[str, Any], *, tool_name: str) -> str:
         explicit_project_id = str(args.get("project_id") or "").strip()
@@ -1859,6 +1880,11 @@ def format_context_info_text(payload: dict[str, Any]) -> str:
             + str(bool(database_runtime.get("reachable"))).lower()
             + f" database={database_runtime.get('database') or '(unknown)'}"
         )
+        if database_runtime.get("deployment_hint"):
+            lines.append(
+                f"- deployment_hint: {database_runtime.get('deployment_hint')} "
+                f"network_scope={database_runtime.get('network_scope') or 'unknown'}"
+            )
         if database_runtime.get("server_version"):
             lines.append(f"- server_version: {database_runtime.get('server_version')}")
         if database_runtime.get("pgvector_available") is not None:
@@ -2149,6 +2175,72 @@ def _symbol_follow_up_reason(*, role: str, kind: Any) -> str:
     if normalized_kind in {"method", "function"}:
         return "Disambigua il punto eseguibile rilevante emerso dal contesto."
     return "Verifica il simbolo tecnico piu' rilevante emerso dal contesto."
+
+
+def _classify_database_target(host: Optional[str]) -> tuple[str, str]:
+    normalized = str(host or "").strip().lower().strip("[]")
+    if not normalized:
+        return ("unknown", "unknown")
+
+    if normalized in {"localhost", "127.0.0.1", "::1"}:
+        return ("loopback", "local_or_docker_port_mapping")
+
+    if normalized.endswith(".docker.internal") or normalized in {
+        "host.docker.internal",
+        "gateway.docker.internal",
+        "postgres",
+        "postgresql",
+        "pgvector",
+        "db",
+    }:
+        return ("docker_alias", "docker_network_alias")
+
+    try:
+        parsed_ip = ipaddress.ip_address(normalized)
+    except ValueError:
+        return ("remote_hostname", "remote_or_managed_postgres")
+
+    if parsed_ip.is_loopback:
+        return ("loopback", "local_or_docker_port_mapping")
+    if parsed_ip.is_private:
+        return ("remote_private", "remote_or_lan_postgres")
+    return ("remote_public", "remote_or_managed_postgres")
+
+
+def _database_unreachable_action(deployment_hint: str) -> str:
+    if deployment_hint == "local_or_docker_port_mapping":
+        return (
+            "Se usi Postgres locale verifica servizio e porta; se usi Docker con port mapping "
+            "verifica che il container sia attivo e che la porta host del DSN sia esposta."
+        )
+    if deployment_hint == "docker_network_alias":
+        return (
+            "Se usi Postgres in Docker senza port mapping verifica rete Docker, hostname del servizio/container "
+            "e reachability dall'ambiente MCP."
+        )
+    if deployment_hint in {"remote_or_lan_postgres", "remote_or_managed_postgres"}:
+        return (
+            "Se usi Postgres remoto o cloud verifica reachability di rete, firewall/VPN, eventuale sslmode "
+            "e credenziali del DSN."
+        )
+    return "Verificare LLM_CONTEXT_DSN, credenziali runtime e reachability del database PostgreSQL."
+
+
+def _pgvector_missing_action(deployment_hint: str) -> str:
+    if deployment_hint == "remote_or_managed_postgres":
+        return (
+            "Verificare che l'istanza PostgreSQL remota supporti pgvector e installare/abilitare "
+            "l'estensione sul database target."
+        )
+    return "Installare o abilitare l'estensione pgvector sul database target prima di usare il runtime."
+
+
+def _schema_missing_action(deployment_hint: str) -> str:
+    if deployment_hint in {"remote_or_lan_postgres", "remote_or_managed_postgres"}:
+        return (
+            "Eseguire init-db-v2 contro il PostgreSQL target configurato nel DSN prima di usare il read-plane."
+        )
+    return "Eseguire init-db-v2 sul database target prima di usare il read-plane."
 
 
 def _derive_symbol_candidates(query_text: Any, *, limit: int = 4) -> list[str]:
