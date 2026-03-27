@@ -57,6 +57,77 @@ def get_connection(dsn: str) -> Any:
     return conn
 
 
+def inspect_database_runtime(
+    dsn: str,
+    *,
+    connect_timeout: int = 3,
+) -> dict[str, Any]:
+    """Return a safe readiness summary for the configured PostgreSQL target."""
+    timeout = _validate_positive_int(connect_timeout, "connect_timeout")
+    result: dict[str, Any] = {
+        "reachable": False,
+        "database": None,
+        "server_version": None,
+        "pgvector_available": None,
+        "schema_ready": None,
+        "required_tables": {},
+        "error": None,
+    }
+    conn = None
+    try:
+        conn = _psycopg.connect(dsn, connect_timeout=timeout)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT current_database(), current_setting('server_version', true);
+                """
+            )
+            row = cur.fetchone() or (None, None)
+            result["database"] = row[0]
+            result["server_version"] = row[1]
+
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_extension
+                    WHERE extname = 'vector'
+                );
+                """
+            )
+            vector_row = cur.fetchone() or (False,)
+            result["pgvector_available"] = bool(vector_row[0])
+
+            cur.execute(
+                """
+                SELECT
+                    to_regclass('public.documents') IS NOT NULL,
+                    to_regclass('public.chunks') IS NOT NULL,
+                    to_regclass('public.chunk_embeddings') IS NOT NULL,
+                    to_regclass('public.index_runs') IS NOT NULL,
+                    to_regclass('public.symbols') IS NOT NULL;
+                """
+            )
+            tables_row = cur.fetchone() or (False, False, False, False, False)
+            required_tables = {
+                "documents": bool(tables_row[0]),
+                "chunks": bool(tables_row[1]),
+                "chunk_embeddings": bool(tables_row[2]),
+                "index_runs": bool(tables_row[3]),
+                "symbols": bool(tables_row[4]),
+            }
+            result["required_tables"] = required_tables
+            result["schema_ready"] = all(required_tables.values())
+            result["reachable"] = True
+        return result
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        return result
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def init_db_v2(conn: Any, embedding_dim: int, ivfflat_lists: int) -> None:
     dim = _validate_positive_int(embedding_dim, "embedding_dim")
     lists = _validate_positive_int(ivfflat_lists, "ivfflat_lists")

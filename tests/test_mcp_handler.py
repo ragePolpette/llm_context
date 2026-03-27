@@ -17,6 +17,25 @@ def default_env(monkeypatch):
     monkeypatch.setenv("LLM_CONTEXT_DSN", "postgresql://ctx_user:ctx_pass@localhost:5432/postgres")
     monkeypatch.setenv("LLM_CONTEXT_EMBEDDER", "local-hash")
     monkeypatch.setenv("LLM_CONTEXT_MAX_QUERY_EMBEDDING_ITEMS", "16")
+    monkeypatch.setattr(
+        mcp_handler_module,
+        "inspect_database_runtime",
+        lambda dsn, connect_timeout=3: {
+            "reachable": True,
+            "database": "postgres",
+            "server_version": "16.0",
+            "pgvector_available": True,
+            "schema_ready": True,
+            "required_tables": {
+                "documents": True,
+                "chunks": True,
+                "chunk_embeddings": True,
+                "index_runs": True,
+                "symbols": True,
+            },
+            "error": None,
+        },
+    )
 
 
 @pytest.fixture
@@ -329,6 +348,7 @@ def test_context_info_exposes_tool_map_and_usage_notes(no_warmup):
     assert payload["config_path"].endswith("config.yaml")
     assert payload["storage_target"]["database"] == "postgres"
     assert payload["storage_target"]["dedicated_candidate"] is False
+    assert payload["database_runtime"]["reachable"] is True
     assert "runtime_readiness" in payload
     assert payload["runtime_readiness"]["status"] in {"degraded", "blocked", "ready"}
     assert "recommended_actions" in payload["runtime_readiness"]
@@ -393,6 +413,13 @@ def test_format_tool_text_formats_context_info_as_decision_guide():
             "runtime_name": "rework",
             "multi_project_enabled": True,
             "default_project_id": "llm_context_rework",
+            "database_runtime": {
+                "reachable": True,
+                "database": "llm_context_rework",
+                "server_version": "16.0",
+                "pgvector_available": True,
+                "schema_ready": True,
+            },
             "runtime_readiness": {
                 "status": "blocked",
                 "ready_for_queries": False,
@@ -420,6 +447,7 @@ def test_format_tool_text_formats_context_info_as_decision_guide():
 
     assert "CONTEXT INFO" in text
     assert "RUNTIME READINESS" in text
+    assert "DATABASE RUNTIME" in text
     assert "status: blocked ready_for_queries=false" in text
     assert "blocker: no_project_with_integrity_ok" in text
     assert "QUICK START" in text
@@ -1087,6 +1115,166 @@ def test_context_operational_status_marks_runtime_readiness_ready(
     assert payload["runtime_readiness"]["ready_for_queries"] is True
     assert payload["runtime_readiness"]["queryable_projects"] == ["alpha", "beta"]
     assert payload["runtime_readiness"]["project_integrity_counts"]["ok"] == 2
+
+
+def test_context_operational_status_marks_database_unreachable_as_blocked(
+    monkeypatch, no_warmup, tmp_path
+):
+    monkeypatch.setenv(
+        "LLM_CONTEXT_DSN",
+        "postgresql://ctx_user:ctx_pass@db-host:5432/llm_context_rework",
+    )
+    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "rework-local-pg")
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    handler._project_registry.save_runtime_state(
+        "alpha",
+        last_ingest_status="success",
+        last_successful_ingest_at="2026-03-27T13:00:00Z",
+        index_version="v2",
+        index_fingerprint="idx-alpha",
+    )
+    handler._project_registry.save_index_manifest(
+        "alpha",
+        {
+            "index_version": "v2",
+            "last_ingest_status": "success",
+            "last_ingest_completed_at": "2026-03-27T13:00:00Z",
+            "index_fingerprint": "idx-alpha",
+            "store_target": {
+                "name": "rework-local-pg",
+                "database": "llm_context_rework",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        handler,
+        "_get_database_runtime_summary",
+        lambda refresh=False: {
+            "reachable": False,
+            "database": None,
+            "server_version": None,
+            "pgvector_available": None,
+            "schema_ready": None,
+            "required_tables": {},
+            "error": "OperationalError: connection refused",
+        },
+    )
+
+    payload = handler.get_operational_status(ready=True)
+
+    assert payload["database_runtime"]["reachable"] is False
+    assert payload["runtime_readiness"]["status"] == "blocked"
+    assert "database_unreachable" in payload["runtime_readiness"]["blocking_reasons"]
+
+
+def test_context_operational_status_marks_pgvector_missing_as_blocked(
+    monkeypatch, no_warmup, tmp_path
+):
+    monkeypatch.setenv(
+        "LLM_CONTEXT_DSN",
+        "postgresql://ctx_user:ctx_pass@db-host:5432/llm_context_rework",
+    )
+    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "rework-local-pg")
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    handler._project_registry.save_runtime_state(
+        "alpha",
+        last_ingest_status="success",
+        last_successful_ingest_at="2026-03-27T13:00:00Z",
+        index_version="v2",
+        index_fingerprint="idx-alpha",
+    )
+    handler._project_registry.save_index_manifest(
+        "alpha",
+        {
+            "index_version": "v2",
+            "last_ingest_status": "success",
+            "last_ingest_completed_at": "2026-03-27T13:00:00Z",
+            "index_fingerprint": "idx-alpha",
+            "store_target": {
+                "name": "rework-local-pg",
+                "database": "llm_context_rework",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        handler,
+        "_get_database_runtime_summary",
+        lambda refresh=False: {
+            "reachable": True,
+            "database": "llm_context_rework",
+            "server_version": "16.0",
+            "pgvector_available": False,
+            "schema_ready": True,
+            "required_tables": {
+                "documents": True,
+                "chunks": True,
+                "chunk_embeddings": True,
+                "index_runs": True,
+                "symbols": True,
+            },
+            "error": None,
+        },
+    )
+
+    payload = handler.get_operational_status(ready=True)
+
+    assert payload["runtime_readiness"]["status"] == "blocked"
+    assert "pgvector_extension_missing" in payload["runtime_readiness"]["blocking_reasons"]
+
+
+def test_context_operational_status_marks_missing_schema_as_blocked(
+    monkeypatch, no_warmup, tmp_path
+):
+    monkeypatch.setenv(
+        "LLM_CONTEXT_DSN",
+        "postgresql://ctx_user:ctx_pass@db-host:5432/llm_context_rework",
+    )
+    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "rework-local-pg")
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    handler._project_registry.save_runtime_state(
+        "alpha",
+        last_ingest_status="success",
+        last_successful_ingest_at="2026-03-27T13:00:00Z",
+        index_version="v2",
+        index_fingerprint="idx-alpha",
+    )
+    handler._project_registry.save_index_manifest(
+        "alpha",
+        {
+            "index_version": "v2",
+            "last_ingest_status": "success",
+            "last_ingest_completed_at": "2026-03-27T13:00:00Z",
+            "index_fingerprint": "idx-alpha",
+            "store_target": {
+                "name": "rework-local-pg",
+                "database": "llm_context_rework",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        handler,
+        "_get_database_runtime_summary",
+        lambda refresh=False: {
+            "reachable": True,
+            "database": "llm_context_rework",
+            "server_version": "16.0",
+            "pgvector_available": True,
+            "schema_ready": False,
+            "required_tables": {
+                "documents": True,
+                "chunks": True,
+                "chunk_embeddings": False,
+                "index_runs": True,
+                "symbols": True,
+            },
+            "error": None,
+        },
+    )
+
+    payload = handler.get_operational_status(ready=True)
+
+    assert payload["runtime_readiness"]["status"] == "blocked"
+    assert "database_schema_not_initialized" in payload["runtime_readiness"]["blocking_reasons"]
 
 
 def test_context_operational_status_marks_not_indexed_projects_as_blocked(
