@@ -126,6 +126,7 @@ L'endpoint `/health` espone ora anche stato operativo utile per la dashboard est
 - riepilogo per progetto con stato ingest e freshness base
 - `project_manifest_dir`
 - riepilogo manifest per progetto con conteggi indice e ultimo stato ingest
+- stato `integrity` per progetto (`ok`, `indexing`, `not_indexed`, `stale`, `unreliable`) con motivi espliciti
 
 ## Spiegazione teorica (cosa abbiamo fatto e perche')
 
