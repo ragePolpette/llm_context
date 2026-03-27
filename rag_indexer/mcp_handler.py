@@ -15,13 +15,14 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
 from rag_indexer.agent_context import build_context
 from rag_indexer.config import load_config
 from rag_indexer.context_assembler import assemble_functional_context
-from rag_indexer.db import get_connection, get_pool
+from rag_indexer.db import get_connection, get_pool, inspect_database_runtime
 from rag_indexer.embedder import (
     DummyEmbedder,
     Embedder,
@@ -86,6 +87,17 @@ class MCPHandler:
             os.getenv("LLM_CONTEXT_MAX_QUERY_EMBEDDING_ITEMS", "4096")
         )
         self._embedder_cache: dict[str, Embedder] = {}
+        self._db_probe_cache: Optional[dict[str, Any]] = None
+        self._db_probe_cache_at = 0.0
+        self._db_probe_lock = threading.Lock()
+        self._db_probe_ttl_seconds = max(
+            0,
+            int(os.getenv("LLM_CONTEXT_DB_PROBE_TTL_SECONDS", "5")),
+        )
+        self._db_connect_timeout_seconds = max(
+            1,
+            int(os.getenv("LLM_CONTEXT_DB_CONNECT_TIMEOUT_SECONDS", "3")),
+        )
         self._ready = threading.Event()
 
         # Start warmup in background
@@ -461,12 +473,17 @@ class MCPHandler:
 
     def _run_context_info(self) -> dict[str, Any]:
         """Describe scope and boundaries of llm-context MCP."""
-        runtime_readiness = self._build_runtime_readiness(ready=self._ready.is_set())
+        database_runtime = self._get_database_runtime_summary()
+        runtime_readiness = self._build_runtime_readiness(
+            ready=self._ready.is_set(),
+            database_runtime=database_runtime,
+        )
         return {
             "server": "llm-context-mcp",
             "runtime_name": self._runtime_name,
             "config_path": self._config_path,
             "storage_target": self._build_storage_target_summary(),
+            "database_runtime": database_runtime,
             "runtime_readiness": runtime_readiness,
             "purpose": "Recupero contesto da codice/documenti indicizzati (RAG).",
             "multi_project_enabled": self._config.multi_project_enabled,
@@ -740,15 +757,18 @@ class MCPHandler:
             self._build_project_status_summary(project)
             for project in self._project_registry.list_projects()
         ]
+        database_runtime = self._get_database_runtime_summary()
         runtime_readiness = self._build_runtime_readiness(
             ready=ready,
             project_summaries=projects,
+            database_runtime=database_runtime,
         )
         return {
             "status": "ready" if ready else "loading",
             "runtime_name": self._runtime_name,
             "config_path": self._config_path,
             "storage_target": self._build_storage_target_summary(),
+            "database_runtime": database_runtime,
             "runtime_readiness": runtime_readiness,
             "project_manifest_dir": str(self._project_registry.manifest_dir),
             "multi_project_enabled": self._config.multi_project_enabled,
@@ -784,12 +804,15 @@ class MCPHandler:
         *,
         ready: bool,
         project_summaries: Optional[list[dict[str, Any]]] = None,
+        database_runtime: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         if project_summaries is None:
             project_summaries = [
                 self._build_project_status_summary(project)
                 for project in self._project_registry.list_projects()
             ]
+        if database_runtime is None:
+            database_runtime = self._get_database_runtime_summary()
 
         warnings: list[str] = []
         blockers: list[str] = []
@@ -838,6 +861,86 @@ class MCPHandler:
         if not dedicated_candidate:
             add_warning("storage_target_is_not_clearly_dedicated")
             add_action("Usare un database dedicato al rework per evitare ambiguita' con il live.")
+
+        database_reachable = bool(database_runtime.get("reachable"))
+        database_error = str(database_runtime.get("error") or "").strip()
+        checks.append(
+            {
+                "name": "database_connection",
+                "status": "ok" if database_reachable else "error",
+                "detail": (
+                    f"Database PostgreSQL raggiungibile: {database_runtime.get('database') or storage_target.get('database') or '(unknown)'}."
+                    if database_reachable
+                    else (
+                        f"Connessione al database fallita: {database_error}"
+                        if database_error
+                        else "Connessione al database fallita."
+                    )
+                ),
+            }
+        )
+        if not database_reachable:
+            add_blocker("database_unreachable")
+            add_action(
+                "Verificare LLM_CONTEXT_DSN, credenziali runtime e reachability del database PostgreSQL."
+            )
+
+        pgvector_available = database_runtime.get("pgvector_available")
+        checks.append(
+            {
+                "name": "pgvector_extension",
+                "status": (
+                    "ok"
+                    if pgvector_available is True
+                    else ("error" if database_reachable else "pending")
+                ),
+                "detail": (
+                    "Estensione pgvector disponibile."
+                    if pgvector_available is True
+                    else (
+                        "Estensione pgvector non trovata nel database target."
+                        if database_reachable
+                        else "Verifica pgvector rimandata finche' il database non e' raggiungibile."
+                    )
+                ),
+            }
+        )
+        if database_reachable and pgvector_available is not True:
+            add_blocker("pgvector_extension_missing")
+            add_action(
+                "Installare l'estensione pgvector sul database target prima di usare il runtime."
+            )
+
+        schema_ready = database_runtime.get("schema_ready")
+        required_tables = database_runtime.get("required_tables") or {}
+        missing_tables = [
+            name for name, present in required_tables.items() if not bool(present)
+        ]
+        checks.append(
+            {
+                "name": "database_schema",
+                "status": (
+                    "ok"
+                    if schema_ready is True
+                    else ("error" if database_reachable else "pending")
+                ),
+                "detail": (
+                    "Schema v2 presente sul database target."
+                    if schema_ready is True
+                    else (
+                        "Schema v2 incompleto; tabelle mancanti: "
+                        + ", ".join(missing_tables[:5])
+                        if database_reachable and missing_tables
+                        else (
+                            "Schema v2 non verificabile finche' il database non e' raggiungibile."
+                        )
+                    )
+                ),
+            }
+        )
+        if database_reachable and schema_ready is not True:
+            add_blocker("database_schema_not_initialized")
+            add_action("Eseguire init-db-v2 sul database target prima di usare il read-plane.")
 
         project_count = len(project_summaries)
         registry_ready = project_count > 0
@@ -937,9 +1040,9 @@ class MCPHandler:
         if project_count > 0 and not queryable_projects and not indexing_projects:
             add_blocker("no_project_with_integrity_ok")
 
-        ready_for_queries = ready and bool(queryable_projects)
+        ready_for_queries = ready and bool(queryable_projects) and not blockers
         if blockers:
-            status = "degraded" if ready_for_queries else "blocked"
+            status = "blocked"
         elif warnings:
             status = "degraded" if ready else "blocked"
         elif ready_for_queries:
@@ -1111,6 +1214,25 @@ class MCPHandler:
             "dsn_fingerprint": fingerprint,
             "dedicated_candidate": dedicated_candidate,
         }
+
+    def _get_database_runtime_summary(self, *, refresh: bool = False) -> dict[str, Any]:
+        now = monotonic()
+        if not refresh and self._db_probe_ttl_seconds > 0:
+            with self._db_probe_lock:
+                if (
+                    self._db_probe_cache is not None
+                    and (now - self._db_probe_cache_at) < self._db_probe_ttl_seconds
+                ):
+                    return dict(self._db_probe_cache)
+
+        runtime = inspect_database_runtime(
+            self._default_dsn,
+            connect_timeout=self._db_connect_timeout_seconds,
+        )
+        with self._db_probe_lock:
+            self._db_probe_cache = dict(runtime)
+            self._db_probe_cache_at = now
+        return dict(runtime)
 
     def _resolve_project_id(self, args: dict[str, Any], *, tool_name: str) -> str:
         explicit_project_id = str(args.get("project_id") or "").strip()
@@ -1727,6 +1849,30 @@ def format_context_info_text(payload: dict[str, Any]) -> str:
             lines.append(f"- warning: {item}")
         for item in (runtime_readiness.get("recommended_actions") or [])[:5]:
             lines.append(f"- action: {item}")
+        lines.append("")
+
+    database_runtime = payload.get("database_runtime") or {}
+    if database_runtime:
+        lines.append("DATABASE RUNTIME")
+        lines.append(
+            "- reachable: "
+            + str(bool(database_runtime.get("reachable"))).lower()
+            + f" database={database_runtime.get('database') or '(unknown)'}"
+        )
+        if database_runtime.get("server_version"):
+            lines.append(f"- server_version: {database_runtime.get('server_version')}")
+        if database_runtime.get("pgvector_available") is not None:
+            lines.append(
+                "- pgvector_available: "
+                + str(bool(database_runtime.get("pgvector_available"))).lower()
+            )
+        if database_runtime.get("schema_ready") is not None:
+            lines.append(
+                "- schema_ready: "
+                + str(bool(database_runtime.get("schema_ready"))).lower()
+            )
+        if database_runtime.get("error"):
+            lines.append(f"- error: {database_runtime.get('error')}")
         lines.append("")
 
     quick_start = payload.get("quick_start") or []
