@@ -63,6 +63,7 @@ docs/
 .vscode/
 .claude/
 claude.md
+!CLAUDE.md
 .agent/
 .mcp_server.lock
 .DS_Store
