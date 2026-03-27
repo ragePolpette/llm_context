@@ -19,7 +19,7 @@ Nota operativa:
 
 Ordine d'uso raccomandato:
 
-- `context_info`: capire ruoli, limiti e workflow dei tool disponibili
+- `context_info`: capire ruoli, limiti, quick start e regole decisionali dei tool disponibili
 - `rag_context`: ottenere il package principale per iniziare a lavorare
 - `symbol_search`: disambiguare simboli, signature e linee esatte
 - `rag_search`: approfondire risultati raw o fare ricerca mirata, usando i gruppi per file e gli hint di investigazione restituiti dal tool

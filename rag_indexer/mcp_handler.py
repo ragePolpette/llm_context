@@ -477,6 +477,23 @@ class MCPHandler:
                 "inspection": ["rag_search", "symbol_search"],
                 "discovery": ["context_info", "list_projects", "get_project_info"],
             },
+            "quick_start": [
+                {
+                    "step": "1",
+                    "tool": "context_info",
+                    "reason": "capisci ruoli, limiti e strumenti disponibili prima di scegliere il flusso",
+                },
+                {
+                    "step": "2",
+                    "tool": "rag_context",
+                    "reason": "ottieni il package principale per iniziare a lavorare sul codice",
+                },
+                {
+                    "step": "3",
+                    "tool": "symbol_search",
+                    "reason": "entra dopo rag_context quando servono linee o signature esatte",
+                },
+            ],
             "tool_roles": {
                 "rag_context": {
                     "role": "default working tool",
@@ -525,6 +542,33 @@ class MCPHandler:
                     ],
                 },
             },
+            "decision_guide": [
+                {
+                    "if": "stai partendo da una query tecnica e vuoi il contesto giusto per lavorare",
+                    "use": ["rag_context"],
+                    "because": "e' il tool principale e restituisce package funzionale, entry point e file core",
+                },
+                {
+                    "if": "stai partendo da ticket, work item o richiesta funzionale",
+                    "use": ["map_work_item_to_codebase", "rag_context"],
+                    "because": "prima mappi la richiesta sulla codebase, poi apri il contesto operativo",
+                },
+                {
+                    "if": "vuoi capire perche' il retrieval prende certi hit o vuoi vedere i match grezzi",
+                    "use": ["rag_search"],
+                    "because": "restituisce raw hits, gruppi per file e hint di investigazione senza assembly",
+                },
+                {
+                    "if": "devi trovare una signature precisa, linee esatte o disambiguare un simbolo",
+                    "use": ["symbol_search"],
+                    "because": "e' il tool di precisione e segue i suggerimenti simbolici emersi da rag_context",
+                },
+                {
+                    "if": "sei in multi-project mode e non sai quale project_id usare",
+                    "use": ["list_projects", "get_project_info"],
+                    "because": "devi scegliere prima il project scope corretto del read-plane",
+                },
+            ],
             "capabilities": [
                 "rag_context: contesto formattato per analisi codice/documenti",
                 "rag_search: risultati raw di retrieval semantico/keyword",
@@ -560,6 +604,11 @@ class MCPHandler:
                     "goal": "partire da ticket o richiesta funzionale",
                     "steps": ["map_work_item_to_codebase", "rag_context", "symbol_search"],
                 },
+            ],
+            "anti_patterns": [
+                "non usare rag_search come primo tool se il tuo obiettivo e' iniziare a lavorare sul codice",
+                "non usare symbol_search per esplorazione larga: parte meglio da rag_context o map_work_item_to_codebase",
+                "non aspettarti che context_info faccia retrieval: serve a scegliere il tool giusto, non a recuperare contesto",
             ],
             "boundaries": [
                 "NON e' un sistema di memoria operativa persistente",
@@ -1124,6 +1173,10 @@ def format_tool_text(name: str, args: dict[str, Any], payload: dict[str, Any]) -
         if format_hint in {"json", "full"}:
             return json.dumps(payload, indent=2, ensure_ascii=True, cls=UUIDEncoder)
         return format_rag_search_text(payload)
+    if name == "context_info":
+        if format_hint in {"json", "full"}:
+            return json.dumps(payload, indent=2, ensure_ascii=True, cls=UUIDEncoder)
+        return format_context_info_text(payload)
     return json.dumps(payload, indent=2, ensure_ascii=True, cls=UUIDEncoder)
 
 
@@ -1310,6 +1363,55 @@ def format_rag_search_text(payload: dict[str, Any]) -> str:
             if snippet:
                 lines.append(snippet)
             lines.append("")
+    return "\n".join(lines).strip()
+
+
+def format_context_info_text(payload: dict[str, Any]) -> str:
+    lines: list[str] = [
+        "CONTEXT INFO",
+        f"server: {payload.get('server') or 'llm-context-mcp'}",
+        f"runtime_name: {payload.get('runtime_name') or 'default'}",
+        f"multi_project_enabled: {str(bool(payload.get('multi_project_enabled'))).lower()}",
+        f"default_project_id: {payload.get('default_project_id') or '(none)'}",
+        "",
+    ]
+
+    quick_start = payload.get("quick_start") or []
+    if quick_start:
+        lines.append("QUICK START")
+        for item in quick_start:
+            step = item.get("step") or "step"
+            tool = item.get("tool") or "tool"
+            reason = item.get("reason") or ""
+            lines.append(f"- {step}: {tool} {reason}".rstrip())
+        lines.append("")
+
+    decision_guide = payload.get("decision_guide") or []
+    if decision_guide:
+        lines.append("DECISION GUIDE")
+        for item in decision_guide:
+            condition = item.get("if") or ""
+            use = ", ".join(str(tool) for tool in item.get("use") or [])
+            because = item.get("because") or ""
+            lines.append(f"- if {condition} -> use {use}; {because}".rstrip())
+        lines.append("")
+
+    anti_patterns = payload.get("anti_patterns") or []
+    if anti_patterns:
+        lines.append("ANTI-PATTERNS")
+        for item in anti_patterns:
+            lines.append(f"- {item}")
+        lines.append("")
+
+    recommended_workflows = payload.get("recommended_workflows") or []
+    if recommended_workflows:
+        lines.append("WORKFLOWS")
+        for item in recommended_workflows:
+            goal = item.get("goal") or "workflow"
+            steps = " -> ".join(str(step) for step in item.get("steps") or [])
+            lines.append(f"- {goal}: {steps}")
+        lines.append("")
+
     return "\n".join(lines).strip()
 
 
