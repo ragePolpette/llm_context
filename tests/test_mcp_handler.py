@@ -349,6 +349,7 @@ def test_context_info_exposes_tool_map_and_usage_notes(no_warmup):
     assert payload["storage_target"]["database"] == "postgres"
     assert payload["storage_target"]["dedicated_candidate"] is False
     assert payload["database_runtime"]["reachable"] is True
+    assert payload["database_runtime"]["deployment_hint"] == "local_or_docker_port_mapping"
     assert "runtime_readiness" in payload
     assert payload["runtime_readiness"]["status"] in {"degraded", "blocked", "ready"}
     assert "recommended_actions" in payload["runtime_readiness"]
@@ -416,6 +417,8 @@ def test_format_tool_text_formats_context_info_as_decision_guide():
             "database_runtime": {
                 "reachable": True,
                 "database": "llm_context_rework",
+                "deployment_hint": "remote_or_managed_postgres",
+                "network_scope": "remote_hostname",
                 "server_version": "16.0",
                 "pgvector_available": True,
                 "schema_ready": True,
@@ -448,6 +451,7 @@ def test_format_tool_text_formats_context_info_as_decision_guide():
     assert "CONTEXT INFO" in text
     assert "RUNTIME READINESS" in text
     assert "DATABASE RUNTIME" in text
+    assert "deployment_hint: remote_or_managed_postgres network_scope=remote_hostname" in text
     assert "status: blocked ready_for_queries=false" in text
     assert "blocker: no_project_with_integrity_ok" in text
     assert "QUICK START" in text
@@ -1163,8 +1167,13 @@ def test_context_operational_status_marks_database_unreachable_as_blocked(
     payload = handler.get_operational_status(ready=True)
 
     assert payload["database_runtime"]["reachable"] is False
+    assert payload["database_runtime"]["deployment_hint"] == "remote_or_managed_postgres"
     assert payload["runtime_readiness"]["status"] == "blocked"
     assert "database_unreachable" in payload["runtime_readiness"]["blocking_reasons"]
+    assert any(
+        "Postgres remoto o cloud" in item
+        for item in payload["runtime_readiness"]["recommended_actions"]
+    )
 
 
 def test_context_operational_status_marks_pgvector_missing_as_blocked(
@@ -1220,6 +1229,10 @@ def test_context_operational_status_marks_pgvector_missing_as_blocked(
 
     assert payload["runtime_readiness"]["status"] == "blocked"
     assert "pgvector_extension_missing" in payload["runtime_readiness"]["blocking_reasons"]
+    assert any(
+        "supporti pgvector" in item
+        for item in payload["runtime_readiness"]["recommended_actions"]
+    )
 
 
 def test_context_operational_status_marks_missing_schema_as_blocked(
@@ -1275,6 +1288,10 @@ def test_context_operational_status_marks_missing_schema_as_blocked(
 
     assert payload["runtime_readiness"]["status"] == "blocked"
     assert "database_schema_not_initialized" in payload["runtime_readiness"]["blocking_reasons"]
+    assert any(
+        "configurato nel DSN" in item
+        for item in payload["runtime_readiness"]["recommended_actions"]
+    )
 
 
 def test_context_operational_status_marks_not_indexed_projects_as_blocked(
@@ -1303,3 +1320,72 @@ def test_storage_target_summary_marks_dedicated_database(monkeypatch, no_warmup)
     assert payload["storage_target"]["name"] == "rework-local-pg"
     assert payload["storage_target"]["database"] == "llm_context_rework"
     assert payload["storage_target"]["dedicated_candidate"] is True
+    assert payload["storage_target"]["deployment_hint"] == "local_or_docker_port_mapping"
+
+
+def test_storage_target_summary_marks_docker_alias_target(monkeypatch, no_warmup):
+    monkeypatch.setenv(
+        "LLM_CONTEXT_DSN",
+        "postgresql://ctx_user:ctx_pass@host.docker.internal:5432/llm_context_rework",
+    )
+
+    handler = MCPHandler()
+    payload = handler.get_operational_status(ready=True)
+
+    assert payload["storage_target"]["network_scope"] == "docker_alias"
+    assert payload["storage_target"]["deployment_hint"] == "docker_network_alias"
+
+
+def test_database_unreachable_localhost_suggests_local_or_docker_runbook(
+    monkeypatch, no_warmup, tmp_path
+):
+    monkeypatch.setenv(
+        "LLM_CONTEXT_DSN",
+        "postgresql://ctx_user:ctx_pass@127.0.0.1:5432/llm_context_rework",
+    )
+    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "rework-local-pg")
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    handler._project_registry.save_runtime_state(
+        "alpha",
+        last_ingest_status="success",
+        last_successful_ingest_at="2026-03-27T13:00:00Z",
+        index_version="v2",
+        index_fingerprint="idx-alpha",
+    )
+    handler._project_registry.save_index_manifest(
+        "alpha",
+        {
+            "index_version": "v2",
+            "last_ingest_status": "success",
+            "last_ingest_completed_at": "2026-03-27T13:00:00Z",
+            "index_fingerprint": "idx-alpha",
+            "store_target": {
+                "name": "rework-local-pg",
+                "database": "llm_context_rework",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        handler,
+        "_get_database_runtime_summary",
+        lambda refresh=False: {
+            "reachable": False,
+            "database": None,
+            "host": "127.0.0.1",
+            "port": 5432,
+            "network_scope": "loopback",
+            "deployment_hint": "local_or_docker_port_mapping",
+            "server_version": None,
+            "pgvector_available": None,
+            "schema_ready": None,
+            "required_tables": {},
+            "error": "OperationalError: connection refused",
+        },
+    )
+
+    payload = handler.get_operational_status(ready=True)
+
+    assert any(
+        "Docker con port mapping" in item
+        for item in payload["runtime_readiness"]["recommended_actions"]
+    )
