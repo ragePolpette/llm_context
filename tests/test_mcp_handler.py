@@ -331,9 +331,14 @@ def test_context_info_exposes_tool_map_and_usage_notes(no_warmup):
     assert payload["storage_target"]["dedicated_candidate"] is False
     assert "tool_map" in payload
     assert "tool_roles" in payload
+    assert "quick_start" in payload
+    assert "decision_guide" in payload
+    assert "anti_patterns" in payload
     assert "recommended_workflows" in payload
     assert "rag_context" in payload["tool_map"]["working_context"]
     assert payload["tool_roles"]["symbol_search"]["role"] == "precision lookup"
+    assert payload["quick_start"][0]["tool"] == "context_info"
+    assert payload["decision_guide"][0]["use"] == ["rag_context"]
     assert payload["tool_roles"]["rag_search"]["returns"] == [
         "results",
         "summary",
@@ -374,6 +379,39 @@ def test_format_functional_context_text_includes_symbol_follow_up_section():
     assert "SYMBOL FOLLOW-UP" in text
     assert "method GeneraFattura exact=true role=entry_point" in text
     assert "path=pubblico/api/Controllers/Fattura.cs" in text
+
+
+def test_format_tool_text_formats_context_info_as_decision_guide():
+    text = format_tool_text(
+        "context_info",
+        {},
+        {
+            "server": "llm-context-mcp",
+            "runtime_name": "rework",
+            "multi_project_enabled": True,
+            "default_project_id": "llm_context_rework",
+            "quick_start": [
+                {"step": "1", "tool": "context_info", "reason": "scegli il flusso corretto"}
+            ],
+            "decision_guide": [
+                {
+                    "if": "devi il package principale",
+                    "use": ["rag_context"],
+                    "because": "restituisce il contesto operativo",
+                }
+            ],
+            "anti_patterns": ["non usare rag_search come primo tool"],
+            "recommended_workflows": [
+                {"goal": "iniziare", "steps": ["context_info", "rag_context"]}
+            ],
+        },
+    )
+
+    assert "CONTEXT INFO" in text
+    assert "QUICK START" in text
+    assert "DECISION GUIDE" in text
+    assert "ANTI-PATTERNS" in text
+    assert "if devi il package principale -> use rag_context" in text
 
 
 def test_format_tool_text_formats_rag_search_as_investigation_summary():
