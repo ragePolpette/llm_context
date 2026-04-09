@@ -8,16 +8,16 @@ from mcp_server_http import _coerce_rpc_message
 
 
 def test_raw_rpc_arguments_are_wrapped_for_rag_context():
-    message = _coerce_rpc_message({"query_text": "bpofh", "top_k": 3})
+    message = _coerce_rpc_message({"query_text": "legacylib", "top_k": 3})
 
     assert message["method"] == "tools/call"
     assert message["params"]["name"] == "rag_context"
-    assert message["params"]["arguments"]["query_text"] == "bpofh"
+    assert message["params"]["arguments"]["query_text"] == "legacylib"
 
 
 def test_raw_rpc_arguments_reject_unknown_keys():
     try:
-        _coerce_rpc_message({"query_text": "bpofh", "dsn": "postgres://evil"})
+        _coerce_rpc_message({"query_text": "legacylib", "dsn": "postgres://evil"})
     except ValueError as exc:
         assert "Unsupported /rpc rag_context arguments" in str(exc)
     else:
@@ -65,7 +65,7 @@ def test_tools_call_rag_context_rejects_unknown_arguments():
                 "method": "tools/call",
                 "params": {
                     "name": "rag_context",
-                    "arguments": {"query_text": "bpofh", "dsn": "evil"},
+                    "arguments": {"query_text": "legacylib", "dsn": "evil"},
                 },
             }
         )
@@ -224,3 +224,5 @@ def test_resolve_runtime_config_path_returns_none_when_not_set(monkeypatch):
     monkeypatch.delenv("LLM_CONTEXT_CONFIG_PATH", raising=False)
 
     assert mcp_server_http._resolve_runtime_config_path() is None
+
+

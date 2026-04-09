@@ -79,3 +79,5 @@ def test_query_symbols_escapes_prefix_search(monkeypatch):
     assert "ESCAPE '\\'" in captured["sql_text"]
     assert r"Menu\%\_Service%" in captured["params"]
 
+
+

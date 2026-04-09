@@ -270,3 +270,5 @@ def test_project_registry_merges_existing_index_manifest_fields(tmp_path):
     assert updated.index_manifest.last_ingest_started_at == "2026-03-27T10:00:00Z"
     assert updated.index_manifest.last_ingest_status == "failed"
     assert updated.index_manifest.last_error == "boom"
+
+

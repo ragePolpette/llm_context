@@ -172,7 +172,7 @@ def test_ts_regex_class():
 # ---------------------------------------------------------------------------
 
 CS_CODE = """\
-namespace BpoPilot.Services
+namespace LegacyApp.Services
 {
     public class OrderService
     {
@@ -223,7 +223,7 @@ def test_cs_namespace_captured():
     syms = _extract_symbols_regex(CS_CODE, "csharp")
     class_sym = _find(syms, "OrderService", "class")
     assert class_sym is not None
-    assert class_sym.namespace == "BpoPilot.Services"
+    assert class_sym.namespace == "LegacyApp.Services"
 
 
 # ---------------------------------------------------------------------------
@@ -315,3 +315,5 @@ def test_fallback_on_import_error(monkeypatch):
     assert any(s.name == "MyService" for s in syms)
 
     monkeypatch.setattr(mod, "_extract_symbols_treesitter", original)
+
+
