@@ -23,6 +23,27 @@ Agents often need precise technical context without loading an entire repository
 - incremental ingest instead of full reindex every time
 - a retrieval-oriented MCP surface that stays separate from operational memory
 
+## Design Tradeoffs
+
+This project started from a real codebase where a single-project SQLite setup was still barely workable, but sustained indexing and retrieval were already close to the point where an embedded store stopped being comfortable.
+
+The main architectural tradeoff was to prioritize ingestion throughput, retrieval performance, concurrency, and multi-project growth over the simplicity and portability of SQLite.
+
+That led to PostgreSQL with `pgvector`:
+
+- metadata and vector storage stay in one operational stack
+- multi-project indexing has a more credible persistence model
+- retrieval can scale beyond the limits of a single embedded local file
+- the storage layer is better aligned with sustained ingest workloads
+
+The cost is deliberate:
+
+- the project is less portable than an all-SQLite setup
+- local setup is heavier
+- the runtime depends on a database that is worth operating only if the retrieval surface is large enough to justify it
+
+In other words, this repository trades some simplicity for a storage model that better matches real indexing pressure and multi-project retrieval.
+
 ## Core Concepts
 
 - Read-plane vs write-plane: retrieval is exposed through MCP; ingest remains an operational capability
@@ -68,6 +89,12 @@ retrieval + filtering + project scope
    v
 MCP context tools
 ```
+
+## Storage Choice
+
+`pgvector` was chosen here because the repository is not trying to be the smallest possible local demo. It is trying to support a larger retrieval surface derived from real code and documentation, including multi-project indexing where SQLite was no longer a comfortable default.
+
+For a smaller single-project prototype, SQLite can still be a reasonable choice. For this codebase, PostgreSQL plus `pgvector` was the more honest fit.
 
 ## Local Run
 
