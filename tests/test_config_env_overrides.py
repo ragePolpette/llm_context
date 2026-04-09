@@ -29,3 +29,5 @@ def test_load_config_allows_explicit_ingest_override(monkeypatch, tmp_path: Path
 
     assert config.write_enabled is True
     assert config.ingest_enabled is False
+
+

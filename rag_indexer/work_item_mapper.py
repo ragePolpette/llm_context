@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 KNOWN_PRODUCT_ALIASES = {
     "legacy": "legacy",
-    "bpopilot": "legacy",
+    "legacyapp": "legacy",
     "fatturhello": "fatturhello",
     "fiscobot": "fiscobot",
 }
@@ -118,7 +118,7 @@ def _infer_product_target(
             return "fatturhello"
         if "fiscobot" in text:
             return "fiscobot"
-        if any(token in text for token in ("bpopilot", "legacy", "pubblico", "librerie", "controllers")):
+        if any(token in text for token in ("legacyapp", "legacy", "pubblico", "librerie", "controllers")):
             return "legacy"
     return "unknown"
 
@@ -239,3 +239,4 @@ def _build_implementation_hint(
             hint += f" e segui il flusso verso {paths[1]}"
         return hint
     return "Mapping ancora troppo debole per proporre un hint implementativo affidabile."
+

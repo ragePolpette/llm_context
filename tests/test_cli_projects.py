@@ -200,3 +200,5 @@ def test_run_ingest_command_updates_project_runtime_state(monkeypatch, tmp_path)
     assert reloaded.index_manifest.indexed_documents == 4
     assert reloaded.index_manifest.indexed_chunks == 8
     assert reloaded.index_manifest.indexed_symbols == 2
+
+
