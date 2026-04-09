@@ -59,3 +59,5 @@ def test_execute_many_params_reorders_each_row():
         ["second", "first"],
         ["right", "left"],
     ]
+
+

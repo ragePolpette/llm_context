@@ -74,7 +74,7 @@ def test_rag_context_uses_configured_default_dsn(monkeypatch, no_warmup):
 
     payload = handler._run_rag_context(
         {
-            "query_text": "bpofh",
+            "query_text": "legacylib",
             "dsn": "postgresql://evil:evil@remote:5432/other",
         }
     )
@@ -91,20 +91,20 @@ def test_rag_context_retries_without_auto_scope_when_derived_prefix_has_no_hits(
         calls.append(kwargs["path_prefix"])
         if len(calls) == 1:
             return "ctx-empty", []
-        return "ctx-final", [{"path": "pubblico/api/Controllers/Fattura.cs", "score": 0.91, "content": "match"}]
+        return "ctx-final", [{"path": "src/api/controllers/BillingController.cs", "score": 0.91, "content": "match"}]
 
     monkeypatch.setattr(mcp_handler_module, "build_context", fake_build_context)
-    monkeypatch.setattr(mcp_handler_module, "resolve_path_prefix", lambda **kwargs: "pubblico/api/Controllers/Fattura.cs")
+    monkeypatch.setattr(mcp_handler_module, "resolve_path_prefix", lambda **kwargs: "src/api/controllers/BillingController.cs")
     monkeypatch.setattr(mcp_handler_module, "format_context_sheet", lambda **kwargs: "sheet")
     handler = MCPHandler()
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
     monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [])
 
-    payload = handler._run_rag_context({"query_text": "GeneraFattura fatturazione studi"})
+    payload = handler._run_rag_context({"query_text": "GenerateInvoice fatturazione studi"})
 
-    assert calls == ["pubblico/api/Controllers/Fattura.cs", None]
+    assert calls == ["src/api/controllers/BillingController.cs", None]
     assert payload["meta"]["auto_scope_fallback_used"] is True
-    assert payload["meta"]["initial_path_prefix"] == "pubblico/api/Controllers/Fattura.cs"
+    assert payload["meta"]["initial_path_prefix"] == "src/api/controllers/BillingController.cs"
     assert payload["meta"]["path_prefix"] is None
 
 
@@ -122,71 +122,71 @@ def test_rag_context_does_not_retry_when_path_prefix_is_explicit(monkeypatch, no
     monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [])
 
     payload = handler._run_rag_context(
-        {"query_text": "GeneraFattura", "path_prefix": "pubblico/api/Controllers/Fattura.cs"}
+        {"query_text": "GenerateInvoice", "path_prefix": "src/api/controllers/BillingController.cs"}
     )
 
-    assert calls == ["pubblico\\api\\Controllers\\Fattura.cs"]
+    assert calls == ["src\\api\\controllers\\BillingController.cs"]
     assert payload["meta"]["auto_scope_fallback_used"] is False
 
 
 def test_rag_context_builds_symbol_follow_up_from_core_file_roles(monkeypatch, no_warmup):
     retrieval_results = [
         {
-            "source_path": "pubblico/api/Controllers/Fattura.cs",
+            "source_path": "src/api/controllers/BillingController.cs",
             "score": 0.92,
             "text_hash": "controller-hit",
             "line_start": 10,
             "line_end": 30,
             "chunk_index": 0,
             "section_path": "",
-            "snippet": "Endpoint di generazione fattura.",
-            "text": "public class FatturaController { ... }",
+            "snippet": "Billing API entry point.",
+            "text": "public class BillingController { ... }",
         },
         {
-            "source_path": "librerie/BpoFH/FatturazioneService.cs",
+            "source_path": "src/domain/services/BillingService.cs",
             "score": 0.88,
             "text_hash": "service-hit",
             "line_start": 50,
             "line_end": 90,
             "chunk_index": 0,
             "section_path": "",
-            "snippet": "Servizio che esegue GeneraFattura.",
-            "text": "public class FatturazioneService { ... }",
+            "snippet": "Service that executes GenerateInvoice.",
+            "text": "public class BillingService { ... }",
         },
         {
-            "source_path": "pubblico/api/IFatture.cs",
+            "source_path": "src/api/contracts/IBillingService.cs",
             "score": 0.81,
             "text_hash": "contract-hit",
             "line_start": 1,
             "line_end": 20,
             "chunk_index": 0,
             "section_path": "",
-            "snippet": "Contratto IFatture dell'API.",
-            "text": "public interface IFatture { ... }",
+            "snippet": "Contract for the billing API.",
+            "text": "public interface IBillingService { ... }",
         },
     ]
     symbol_results = [
         {
-            "source_path": "pubblico/api/Controllers/Fattura.cs",
-            "name": "GeneraFattura",
+            "source_path": "src/api/controllers/BillingController.cs",
+            "name": "GenerateInvoice",
             "kind": "method",
-            "signature": "public void GeneraFattura()",
+            "signature": "public void GenerateInvoice()",
             "line_start": 44,
             "line_end": 60,
         },
         {
-            "source_path": "librerie/BpoFH/FatturazioneService.cs",
-            "name": "FatturazioneService",
+            "source_path": "src/domain/services/BillingService.cs",
+            "name": "BillingService",
             "kind": "class",
-            "signature": "public class FatturazioneService",
+            "signature": "public class BillingService",
             "line_start": 1,
             "line_end": 120,
         },
         {
-            "source_path": "pubblico/api/IFatture.cs",
-            "name": "IFatture",
+            "source_path": "src/api/contracts/IBillingService.cs",
+            "name": "IBillingService",
             "kind": "interface",
-            "signature": "public interface IFatture",
+            "signature": "public interface IBillingService",
             "line_start": 1,
             "line_end": 40,
         },
@@ -198,15 +198,15 @@ def test_rag_context_builds_symbol_follow_up_from_core_file_roles(monkeypatch, n
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
     monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: symbol_results)
 
-    payload = handler._run_rag_context({"query_text": "GeneraFattura fattura api"})
+    payload = handler._run_rag_context({"query_text": "GenerateInvoice billing api"})
 
     symbol_follow_up = payload["functional_context"]["tool_hints"]["symbol_follow_up"]
     suggested_queries = symbol_follow_up["suggested_queries"]
 
     assert [item["name"] for item in suggested_queries[:3]] == [
-        "GeneraFattura",
-        "FatturazioneService",
-        "IFatture",
+        "GenerateInvoice",
+        "BillingService",
+        "IBillingService",
     ]
     assert [item["source_role"] for item in suggested_queries[:3]] == [
         "entry_point",
@@ -215,12 +215,12 @@ def test_rag_context_builds_symbol_follow_up_from_core_file_roles(monkeypatch, n
     ]
     assert all(item["exact"] is True for item in suggested_queries[:3])
     assert symbol_follow_up["focus_paths"] == [
-        "pubblico/api/Controllers/Fattura.cs",
-        "librerie/BpoFH/FatturazioneService.cs",
-        "pubblico/api/IFatture.cs",
+        "src/api/controllers/BillingController.cs",
+        "src/domain/services/BillingService.cs",
+        "src/api/contracts/IBillingService.cs",
     ]
     assert payload["functional_context"]["tool_hints"]["recommended_follow_up"][0]["tool"] == "symbol_search"
-    assert payload["functional_context"]["tool_hints"]["recommended_follow_up"][0]["suggested_queries"][0]["name"] == "GeneraFattura"
+    assert payload["functional_context"]["tool_hints"]["recommended_follow_up"][0]["suggested_queries"][0]["name"] == "GenerateInvoice"
 
 
 def test_rag_context_symbol_follow_up_falls_back_to_query_candidates(monkeypatch, no_warmup):
@@ -230,11 +230,11 @@ def test_rag_context_symbol_follow_up_falls_back_to_query_candidates(monkeypatch
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
     monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [])
 
-    payload = handler._run_rag_context({"query_text": "Apri GeneraFattura e IFatture"})
+    payload = handler._run_rag_context({"query_text": "Apri GenerateInvoice e IFatture"})
 
     suggested_queries = payload["functional_context"]["tool_hints"]["symbol_follow_up"]["suggested_queries"]
 
-    assert [item["name"] for item in suggested_queries] == ["GeneraFattura", "IFatture"]
+    assert [item["name"] for item in suggested_queries] == ["GenerateInvoice", "IFatture"]
     assert all(item["exact"] is False for item in suggested_queries)
     assert all(item["source_role"] == "query_candidate" for item in suggested_queries)
 
@@ -242,29 +242,29 @@ def test_rag_context_symbol_follow_up_falls_back_to_query_candidates(monkeypatch
 def test_rag_search_returns_investigation_payload(monkeypatch, no_warmup):
     retrieval_results = [
         {
-            "source_path": "pubblico/api/Controllers/Fattura.cs",
+            "source_path": "src/api/controllers/BillingController.cs",
             "score": 0.94,
             "text_hash": "a1",
             "line_start": 10,
             "line_end": 30,
             "chunk_index": 0,
             "section_path": "",
-            "snippet": "Controller principale per GeneraFattura.",
+            "snippet": "Controller principale per GenerateInvoice.",
             "text": "public class FatturaController { ... }",
         },
         {
-            "source_path": "pubblico/api/Controllers/Fattura.cs",
+            "source_path": "src/api/controllers/BillingController.cs",
             "score": 0.88,
             "text_hash": "a2",
             "line_start": 44,
             "line_end": 60,
             "chunk_index": 1,
             "section_path": "",
-            "snippet": "Metodo GeneraFattura.",
-            "text": "public void GeneraFattura() { ... }",
+            "snippet": "Metodo GenerateInvoice.",
+            "text": "public void GenerateInvoice() { ... }",
         },
         {
-            "source_path": "librerie/BpoFH/FatturazioneService.cs",
+            "source_path": "src/domain/services/InvoiceService.cs",
             "score": 0.82,
             "text_hash": "b1",
             "line_start": 5,
@@ -272,15 +272,15 @@ def test_rag_search_returns_investigation_payload(monkeypatch, no_warmup):
             "chunk_index": 0,
             "section_path": "",
             "snippet": "Implementazione del servizio fatture.",
-            "text": "public class FatturazioneService { ... }",
+            "text": "public class InvoiceService { ... }",
         },
     ]
     symbol_results = [
         {
-            "source_path": "pubblico/api/Controllers/Fattura.cs",
-            "name": "GeneraFattura",
+            "source_path": "src/api/controllers/BillingController.cs",
+            "name": "GenerateInvoice",
             "kind": "method",
-            "signature": "public void GeneraFattura()",
+            "signature": "public void GenerateInvoice()",
             "line_start": 44,
             "line_end": 60,
         }
@@ -292,16 +292,16 @@ def test_rag_search_returns_investigation_payload(monkeypatch, no_warmup):
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
     monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: symbol_results)
 
-    payload = handler._run_rag_search({"query_text": "GeneraFattura fattura api"})
+    payload = handler._run_rag_search({"query_text": "GenerateInvoice fattura api"})
 
     assert payload["summary"]["result_count"] == 3
     assert payload["summary"]["unique_file_count"] == 2
     assert payload["summary"]["coverage"] == "focused_multi_file"
     assert payload["meta"]["search_mode"] == "investigation"
-    assert payload["result_groups"][0]["source_path"] == "pubblico/api/Controllers/Fattura.cs"
+    assert payload["result_groups"][0]["source_path"] == "src/api/controllers/BillingController.cs"
     assert payload["result_groups"][0]["hit_count"] == 2
-    assert payload["investigation_hints"]["suggested_files"][0] == "pubblico/api/Controllers/Fattura.cs"
-    assert payload["investigation_hints"]["suggested_symbol_queries"][0]["name"] == "GeneraFattura"
+    assert payload["investigation_hints"]["suggested_files"][0] == "src/api/controllers/BillingController.cs"
+    assert payload["investigation_hints"]["suggested_symbol_queries"][0]["name"] == "GenerateInvoice"
 
 
 def test_symbol_search_uses_configured_default_dsn(monkeypatch, no_warmup):
@@ -376,7 +376,7 @@ def test_context_info_exposes_tool_map_and_usage_notes(no_warmup):
 def test_format_functional_context_text_includes_symbol_follow_up_section():
     text = format_functional_context_text(
         {
-            "query": {"text": "GeneraFattura", "path_prefix": None},
+            "query": {"text": "GenerateInvoice", "path_prefix": None},
             "summary": {"core_file_count": 1, "supporting_match_count": 0, "symbol_hit_count": 2},
             "entry_points": [],
             "core_files": [],
@@ -386,10 +386,10 @@ def test_format_functional_context_text_includes_symbol_follow_up_section():
                 "symbol_follow_up": {
                     "suggested_queries": [
                         {
-                            "name": "GeneraFattura",
+                            "name": "GenerateInvoice",
                             "kind": "method",
                             "exact": True,
-                            "source_path": "pubblico/api/Controllers/Fattura.cs",
+                            "source_path": "src/api/controllers/BillingController.cs",
                             "source_role": "entry_point",
                             "reason": "Conferma il simbolo di ingresso.",
                         }
@@ -401,8 +401,8 @@ def test_format_functional_context_text_includes_symbol_follow_up_section():
     )
 
     assert "SYMBOL FOLLOW-UP" in text
-    assert "method GeneraFattura exact=true role=entry_point" in text
-    assert "path=pubblico/api/Controllers/Fattura.cs" in text
+    assert "method GenerateInvoice exact=true role=entry_point" in text
+    assert "path=src/api/controllers/BillingController.cs" in text
 
 
 def test_format_tool_text_formats_context_info_as_decision_guide():
@@ -465,7 +465,7 @@ def test_format_tool_text_formats_rag_search_as_investigation_summary():
         "rag_search",
         {},
         {
-            "query": {"text": "GeneraFattura", "path_prefix": None},
+            "query": {"text": "GenerateInvoice", "path_prefix": None},
             "summary": {
                 "result_count": 2,
                 "unique_file_count": 1,
@@ -474,25 +474,25 @@ def test_format_tool_text_formats_rag_search_as_investigation_summary():
             },
             "result_groups": [
                 {
-                    "source_path": "pubblico/api/Controllers/Fattura.cs",
+                    "source_path": "src/api/controllers/BillingController.cs",
                     "hit_count": 2,
                     "top_score": 0.94,
                     "line_spans": ["L10-L30", "L44-L60"],
                 }
             ],
             "investigation_hints": {
-                "suggested_files": ["pubblico/api/Controllers/Fattura.cs"],
+                "suggested_files": ["src/api/controllers/BillingController.cs"],
                 "suggested_symbol_queries": [
-                    {"name": "GeneraFattura", "kind": "method", "exact": True}
+                    {"name": "GenerateInvoice", "kind": "method", "exact": True}
                 ],
             },
             "results": [
                 {
-                    "source_path": "pubblico/api/Controllers/Fattura.cs",
+                    "source_path": "src/api/controllers/BillingController.cs",
                     "score": 0.94,
                     "line_start": 44,
                     "line_end": 60,
-                    "snippet": "Metodo GeneraFattura.",
+                    "snippet": "Metodo GenerateInvoice.",
                 }
             ],
         },
@@ -501,7 +501,7 @@ def test_format_tool_text_formats_rag_search_as_investigation_summary():
     assert "RAG SEARCH" in text
     assert "TOP FILES" in text
     assert "INVESTIGATION HINTS" in text
-    assert "symbol_search: method GeneraFattura exact=true" in text
+    assert "symbol_search: method GenerateInvoice exact=true" in text
 
 
 def test_symbol_search_uses_pool_when_available(monkeypatch, no_warmup):
@@ -703,7 +703,7 @@ def test_map_work_item_to_codebase_returns_structured_mapping(monkeypatch, no_wa
                 },
                 "entry_points": [
                     {
-                        "name": "GeneraFattura",
+                        "name": "GenerateInvoice",
                         "kind": "method",
                         "source_path": "pubblico\\api\\Controllers\\Fattura.cs",
                         "line_start": 120,
@@ -716,7 +716,7 @@ def test_map_work_item_to_codebase_returns_structured_mapping(monkeypatch, no_wa
                         "aggregate_score": 1.75,
                         "max_score": 0.9,
                         "match_count": 3,
-                        "symbol_hits": [{"name": "GeneraFattura"}],
+                        "symbol_hits": [{"name": "GenerateInvoice"}],
                     },
                     {
                         "source_path": "pubblico\\api\\Services\\Fatture\\Generator.cs",
@@ -747,7 +747,7 @@ def test_map_work_item_to_codebase_returns_structured_mapping(monkeypatch, no_wa
     assert payload["repo_target"] == "alpha"
     assert payload["in_scope"] is True
     assert payload["feasibility"] in {"high", "medium"}
-    assert "GeneraFattura" in payload["implementation_hint"]
+    assert "GenerateInvoice" in payload["implementation_hint"]
     assert payload["paths"][0] == "pubblico\\api\\Controllers\\Fattura.cs"
 
 
@@ -849,7 +849,7 @@ def test_multi_project_mode_requires_explicit_project_id(monkeypatch, no_warmup,
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
 
     with pytest.raises(ValueError, match="requires explicit project_id"):
-        handler._run_rag_context({"query_text": "bpofh"})
+        handler._run_rag_context({"query_text": "legacylib"})
 
 
 def test_single_project_mode_keeps_safe_default_fallback(monkeypatch, no_warmup, tmp_path):
@@ -872,7 +872,7 @@ def test_single_project_mode_keeps_safe_default_fallback(monkeypatch, no_warmup,
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
     monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [])
 
-    payload = handler._run_rag_context({"query_text": "bpofh"})
+    payload = handler._run_rag_context({"query_text": "legacylib"})
 
     assert captured["project_id"] == "alpha"
     assert payload["meta"]["project_id"] == "alpha"
@@ -893,15 +893,15 @@ def test_rag_context_default_format_returns_functional_text():
                 "entry_points": [
                     {
                         "kind": "method",
-                        "name": "GeneraFattura",
-                        "source_path": "pubblico/api/Controllers/Fattura.cs",
+                        "name": "GenerateInvoice",
+                        "source_path": "src/api/controllers/BillingController.cs",
                         "line_start": 10,
                         "line_end": 30,
                     }
                 ],
                 "core_files": [
                     {
-                        "source_path": "pubblico/api/Controllers/Fattura.cs",
+                        "source_path": "src/api/controllers/BillingController.cs",
                         "aggregate_score": 1.2,
                         "match_count": 2,
                         "symbol_hits": [{}],
@@ -913,11 +913,11 @@ def test_rag_context_default_format_returns_functional_text():
                         {
                             "tool": "symbol_search",
                             "reason": "Usa symbol_search per confermare signature.",
-                            "suggested_names": ["GeneraFattura"],
+                            "suggested_names": ["GenerateInvoice"],
                         }
                     ]
                 },
-                "assembled_context": "FILE pubblico/api/Controllers/Fattura.cs\n...",
+                "assembled_context": "FILE src/api/controllers/BillingController.cs\n...",
             },
             "context": "legacy ctx",
             "context_sheet": "legacy sheet",
@@ -943,22 +943,22 @@ def test_rag_context_payload_exposes_tool_hints(monkeypatch, no_warmup):
         "_collect_context_symbols",
         lambda **kwargs: [
             {
-                "name": "GeneraFattura",
+                "name": "GenerateInvoice",
                 "kind": "method",
-                "source_path": "pubblico/api/Controllers/Fattura.cs",
+                "source_path": "src/api/controllers/BillingController.cs",
                 "line_start": 10,
                 "line_end": 20,
-                "signature": "void GeneraFattura()",
+                "signature": "void GenerateInvoice()",
             }
         ],
     )
 
-    payload = handler._run_rag_context({"query_text": "GeneraFattura"})
+    payload = handler._run_rag_context({"query_text": "GenerateInvoice"})
 
     tool_hints = payload["functional_context"]["tool_hints"]
     assert tool_hints["primary_tool"] == "rag_context"
     assert tool_hints["recommended_follow_up"][0]["tool"] == "symbol_search"
-    assert "GeneraFattura" in tool_hints["recommended_follow_up"][0]["suggested_names"]
+    assert "GenerateInvoice" in tool_hints["recommended_follow_up"][0]["suggested_names"]
 
 
 def test_rag_context_legacy_format_returns_legacy_context():
@@ -1389,3 +1389,5 @@ def test_database_unreachable_localhost_suggests_local_or_docker_runbook(
         "Docker con port mapping" in item
         for item in payload["runtime_readiness"]["recommended_actions"]
     )
+
+
