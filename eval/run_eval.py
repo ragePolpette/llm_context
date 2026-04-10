@@ -18,7 +18,10 @@ def main() -> None:
         print("LLM_CONTEXT_DSN not set.")
         return
 
-    repo_id = os.getenv("LLM_CONTEXT_PROJECT_ID", "myproj")
+    repo_id = os.getenv("LLM_CONTEXT_PROJECT_ID")
+    if not repo_id:
+        print("LLM_CONTEXT_PROJECT_ID not set.")
+        return
     embedder_choice = os.getenv("LLM_CONTEXT_EVAL_EMBEDDER", "local-st").lower()
     local_model = os.getenv(
         "LLM_CONTEXT_LOCAL_MODEL",
