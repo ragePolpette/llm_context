@@ -867,7 +867,7 @@ class MCPHandler:
         )
         if not dedicated_candidate:
             add_warning("storage_target_is_not_clearly_dedicated")
-            add_action("Usare un database dedicato al rework per evitare ambiguita' con il live.")
+            add_action("Usare un database dedicato a llm-context per evitare ambiguita' con altri runtime.")
 
         database_reachable = bool(database_runtime.get("reachable"))
         database_error = str(database_runtime.get("error") or "").strip()
@@ -2299,3 +2299,4 @@ def _looks_like_symbol(token: str) -> bool:
     if any(char.isupper() for char in token[1:]):
         return True
     return token.isidentifier() and token.lower() != token
+
