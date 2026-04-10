@@ -9,4 +9,5 @@ if "%LLM_CONTEXT_DSN%"=="" (
   exit /b 1
 )
 
-python cli.py --config config.rework.yaml ingest --dsn "%LLM_CONTEXT_DSN%" --project-id llm_context --embedder local-st --incremental %*
+python cli.py --config config.ingest.yaml ingest --dsn "%LLM_CONTEXT_DSN%" --project-id llm_context --embedder local-st --incremental %*
+
