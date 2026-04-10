@@ -81,7 +81,7 @@ def main() -> int:
         )
 
     host = env.get("MCP_HOST", "127.0.0.1")
-    port = int(env.get("MCP_PORT", "8766"))
+    port = int(env.get("MCP_PORT", "8765"))
     base_url = f"http://{host}:{port}"
 
     process = subprocess.Popen(
@@ -187,5 +187,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 

@@ -551,11 +551,18 @@ def _resolve_ingest_project(registry: ProjectRegistry, project_id: str) -> Proje
 def _resolve_ingest_root(root_arg: Optional[str], project: ProjectRecord) -> Path:
     if root_arg:
         return Path(root_arg).expanduser().resolve()
-    if project.root_path == Path(".").resolve():
+    root_path = Path(project.root_path).expanduser().resolve()
+    has_registry_metadata = bool(
+        project.include_dirs
+        or project.exclude_globs
+        or project.include_profile
+        or project.retrieval_profile
+    )
+    if root_path == Path(".").resolve() and not has_registry_metadata:
         raise RuntimeError(
             "Ingest root is required when no project registry entry is available for the project"
         )
-    return project.root_path
+    return root_path
 
 
 def _build_index_fingerprint(project_id: str, stats) -> str:
@@ -646,3 +653,4 @@ def _embedder_identity(embedder: Embedder) -> str:
 
 if __name__ == "__main__":
     main()
+
