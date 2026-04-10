@@ -1,0 +1,4 @@
+extends: config.rework.yaml
+
+ingest_enabled: true
+write_enabled: true

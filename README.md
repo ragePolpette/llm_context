@@ -126,8 +126,8 @@ Example operational CLI flows:
 
 ```bash
 python cli.py --config config.yaml list-projects --json
-python cli.py --config config.yaml ingest --dsn <dsn> --project-id <project_id>
-python cli.py --config config.yaml ingest-enabled-projects --dsn <dsn>
+python cli.py --config config.ingest.yaml ingest --dsn <dsn> --project-id <project_id>
+python cli.py --config config.ingest.yaml ingest-enabled-projects --dsn <dsn>
 ```
 
 ## Configuration Model
@@ -159,3 +159,5 @@ This repository is in active development. The current runtime already supports r
 ## Development Process
 
 Built with AI-assisted workflows, while architecture, tradeoffs, integration, review, and validation were directed by the author.
+
+
