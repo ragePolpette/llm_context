@@ -1,9 +1,9 @@
 projects:
-  - project_id: llm_context_rework
-    display_name: LLM Context Rework
+  - project_id: llm_context
+    display_name: LLM Context
     root_path: .
-    include_profile: rework-local
-    retrieval_profile: rework-local
+    include_profile: default
+    retrieval_profile: default
     include_dirs:
       - rag_indexer
       - tests
@@ -19,3 +19,7 @@ projects:
       - "mcp_server.err.log"
     ingest_enabled: false
     write_enabled: false
+
+
+
+
