@@ -50,7 +50,7 @@ def _wait_for_health(base_url: str, *, timeout_sec: float) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Smoke test del runtime HTTP rework di llm-context")
+    parser = argparse.ArgumentParser(description="Smoke test del runtime HTTP canonico di llm-context")
     parser.add_argument("--config-path", default="config.rework.yaml")
     parser.add_argument("--dsn", default=None)
     parser.add_argument("--runtime-name", default=None)
@@ -68,7 +68,7 @@ def main() -> int:
         env["LLM_CONTEXT_DSN"] = args.dsn
     if args.runtime_name:
         env["LLM_CONTEXT_RUNTIME_NAME"] = args.runtime_name
-    env.setdefault("LLM_CONTEXT_RUNTIME_NAME", "rework")
+    env.setdefault("LLM_CONTEXT_RUNTIME_NAME", "llm-context")
     env.setdefault("PYTHONPATH", str(root_dir))
     env["LLM_CONTEXT_EMBEDDER"] = "local-hash"
     if args.host:
@@ -187,3 +187,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

@@ -214,7 +214,7 @@ def test_project_registry_persists_index_manifest(tmp_path):
             "index_fingerprint": "idx-001",
             "config_fingerprint": "cfg-001",
             "source_fingerprint": "src-001",
-            "store_target": {"database": "llm_context_rework"},
+            "store_target": {"database": "llm_context"},
             "embedder_model": "LocalHashEmbedder",
         },
     )
@@ -222,7 +222,7 @@ def test_project_registry_persists_index_manifest(tmp_path):
     assert updated.index_manifest is not None
     assert updated.index_manifest.present is True
     assert updated.index_manifest.indexed_documents == 12
-    assert updated.index_manifest.store_target["database"] == "llm_context_rework"
+    assert updated.index_manifest.store_target["database"] == "llm_context"
 
     reloaded = load_project_registry(registry_path, state_path).require_project("alpha")
     assert reloaded.index_manifest is not None
@@ -270,5 +270,7 @@ def test_project_registry_merges_existing_index_manifest_fields(tmp_path):
     assert updated.index_manifest.last_ingest_started_at == "2026-03-27T10:00:00Z"
     assert updated.index_manifest.last_ingest_status == "failed"
     assert updated.index_manifest.last_error == "boom"
+
+
 
 

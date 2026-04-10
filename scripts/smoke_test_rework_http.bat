@@ -1,6 +1,5 @@
 @echo off
-REM Esegue uno smoke test del runtime HTTP rework via /health e /rpc.
-
+REM Wrapper legacy: inoltra allo smoke test HTTP canonico di llm-context.
 cd /d "%~dp0\.."
+call scripts\smoke_test_http.bat %*
 
-python scripts\smoke_test_rework_http.py %*
