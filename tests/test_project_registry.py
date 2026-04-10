@@ -12,7 +12,6 @@ def test_load_config_resolves_registry_and_state_paths(tmp_path):
     config_path.write_text(
         yaml.safe_dump(
             {
-                "multi_project_enabled": True,
                 "projects_registry_path": "nested/projects.yaml",
                 "projects_state_path": "runtime/projects.state.json",
             }
@@ -22,7 +21,6 @@ def test_load_config_resolves_registry_and_state_paths(tmp_path):
 
     config = load_config(str(config_path))
 
-    assert config.multi_project_enabled is True
     assert config.projects_registry_path == (tmp_path / "nested" / "projects.yaml").resolve()
     assert config.projects_state_path == (tmp_path / "runtime" / "projects.state.json").resolve()
 
@@ -32,7 +30,6 @@ def test_load_config_supports_extends(tmp_path):
     base_path.write_text(
         yaml.safe_dump(
             {
-                "multi_project_enabled": False,
                 "include_dirs": ["src"],
                 "projects_registry_path": "projects.base.yaml",
             }
@@ -44,7 +41,6 @@ def test_load_config_supports_extends(tmp_path):
         yaml.safe_dump(
             {
                 "extends": "base.yaml",
-                "multi_project_enabled": True,
                 "projects_state_path": "runtime/projects.state.json",
             }
         ),
@@ -53,7 +49,6 @@ def test_load_config_supports_extends(tmp_path):
 
     config = load_config(str(child_path))
 
-    assert config.multi_project_enabled is True
     assert config.include_dirs == ["src"]
     assert config.projects_registry_path == (tmp_path / "projects.base.yaml").resolve()
     assert config.projects_state_path == (tmp_path / "runtime" / "projects.state.json").resolve()

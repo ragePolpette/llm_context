@@ -185,3 +185,7 @@ scope_map:
   librerie\\Fiscobot\\:
     - docconta
     - registrazione contabile
+projects_registry_path: projects.rework.yaml
+projects_state_path: .local/runtime/projects.state.json
+ingest_enabled: false
+write_enabled: false

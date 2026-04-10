@@ -61,9 +61,6 @@ class MCPHandler:
         )
         self._embedder_lock = threading.Lock()
         self._default_dsn = self._require_default_dsn()
-        self._default_project_id = str(
-            os.getenv("LLM_CONTEXT_PROJECT_ID", self._config.default_project_id)
-        ).strip()
         self._default_embedder = os.getenv("LLM_CONTEXT_EMBEDDER", "local-st")
         self._allow_embedder_fallback = parse_bool(
             os.getenv("LLM_CONTEXT_ALLOW_EMBEDDER_FALLBACK", "true")
@@ -489,11 +486,9 @@ class MCPHandler:
             "database_runtime": database_runtime,
             "runtime_readiness": runtime_readiness,
             "purpose": "Recupero contesto da codice/documenti indicizzati (RAG).",
-            "multi_project_enabled": self._config.multi_project_enabled,
             "write_enabled": self._config.write_enabled,
             "ingest_enabled": self._config.ingest_enabled,
             "project_count": self._project_registry.project_count(),
-            "default_project_id": self._default_project_id,
             "tool_map": {
                 "working_context": ["rag_context", "map_work_item_to_codebase"],
                 "inspection": ["rag_search", "symbol_search"],
@@ -586,7 +581,7 @@ class MCPHandler:
                     "because": "e' il tool di precisione e segue i suggerimenti simbolici emersi da rag_context",
                 },
                 {
-                    "if": "sei in multi-project mode e non sai quale project_id usare",
+                    "if": "non sai quale project_id usare",
                     "use": ["list_projects", "get_project_info"],
                     "because": "devi scegliere prima il project scope corretto del read-plane",
                 },
@@ -635,7 +630,7 @@ class MCPHandler:
             "boundaries": [
                 "NON e' un sistema di memoria operativa persistente",
                 "NON sostituisce llm-memory per decisioni/preferenze operative",
-                "In multi-project mode le query richiedono project_id esplicito",
+                "Le query read-plane richiedono sempre project_id esplicito",
                 "L'ingest non e' esposto come tool MCP standard",
             ],
         }
@@ -742,7 +737,6 @@ class MCPHandler:
         ]
         return {
             "count": len(projects),
-            "multi_project_enabled": self._config.multi_project_enabled,
             "write_enabled": self._config.write_enabled,
             "ingest_enabled": self._config.ingest_enabled,
             "projects": projects,
@@ -776,7 +770,6 @@ class MCPHandler:
             "database_runtime": database_runtime,
             "runtime_readiness": runtime_readiness,
             "project_manifest_dir": str(self._project_registry.manifest_dir),
-            "multi_project_enabled": self._config.multi_project_enabled,
             "ingest_enabled": self._config.ingest_enabled,
             "write_enabled": self._config.write_enabled,
             "project_count": len(projects),
@@ -947,25 +940,12 @@ class MCPHandler:
 
         project_count = len(project_summaries)
         registry_ready = project_count > 0
-        if self._config.multi_project_enabled:
-            registry_status = "ok" if registry_ready else "error"
-            registry_detail = (
-                f"{project_count} progetti registrati."
-                if registry_ready
-                else "Nessun progetto registrato in multi-project mode."
-            )
-        else:
-            has_safe_default = bool(self._default_project_id)
-            registry_status = "ok" if (registry_ready or has_safe_default) else "error"
-            registry_detail = (
-                f"{project_count} progetti registrati."
-                if registry_ready
-                else (
-                    f"Nessun progetto registrato; fallback sul default_project_id '{self._default_project_id}'."
-                    if has_safe_default
-                    else "Nessun progetto registrato e nessun default_project_id configurato."
-                )
-            )
+        registry_status = "ok" if registry_ready else "error"
+        registry_detail = (
+            f"{project_count} progetti registrati."
+            if registry_ready
+            else "Nessun progetto registrato nel registry."
+        )
         checks.append(
             {
                 "name": "project_registry",
@@ -973,18 +953,9 @@ class MCPHandler:
                 "detail": registry_detail,
             }
         )
-        if self._config.multi_project_enabled and not registry_ready:
-            add_blocker("no_registered_projects_in_multi_project_mode")
-            add_action("Registrare almeno un progetto nel registry prima di usare il read-plane.")
-        elif not self._config.multi_project_enabled and not registry_ready:
-            if self._default_project_id:
-                add_warning("no_registered_projects_using_default_project_fallback")
-                add_action(
-                    f"Verificare che il default_project_id '{self._default_project_id}' abbia un indice coerente."
-                )
-            else:
-                add_blocker("no_registered_projects_and_no_default_project")
-                add_action("Configurare un default_project_id oppure aggiungere un progetto al registry.")
+        if not registry_ready:
+            add_blocker("no_registered_projects")
+            add_action("Registrare almeno un progetto nel registry prima di usare il read-plane o l'ingest.")
 
         integrity_counts: dict[str, int] = {}
         queryable_projects: list[str] = []
@@ -1009,11 +980,6 @@ class MCPHandler:
             indexed_detail = (
                 "Ingest in corso senza un progetto ancora coerente: "
                 + ", ".join(indexing_projects[:5])
-            )
-        elif project_count == 0 and not self._config.multi_project_enabled and self._default_project_id:
-            indexed_status = "warning"
-            indexed_detail = (
-                "Nessun progetto verificabile nel registry; il runtime puo' usare solo il default project."
             )
         else:
             indexed_status = "error"
@@ -1257,64 +1223,22 @@ class MCPHandler:
 
     def _resolve_project_id(self, args: dict[str, Any], *, tool_name: str) -> str:
         explicit_project_id = str(args.get("project_id") or "").strip()
-        if self._config.multi_project_enabled:
-            if not explicit_project_id:
-                raise ValueError(
-                    f"{tool_name} requires explicit project_id in multi-project mode. This is a read-plane MCP tool; "
-                    "when multi_project_enabled=true, you must pass project_id explicitly and "
-                    "no implicit default project is used."
-                )
-            return self._validate_known_project(explicit_project_id)
-
-        if explicit_project_id:
-            return self._validate_known_project(explicit_project_id)
-
-        if self._project_registry.project_count() == 0:
-            return self._default_project_id
-
-        if self._default_project_id and self._project_registry.get_project(self._default_project_id):
-            return self._default_project_id
-
-        projects = self._project_registry.list_projects()
-        if len(projects) == 1:
-            return projects[0].project_id
-
-        raise ValueError(
-            f"{tool_name} could not resolve a safe default project in single-project mode. "
-            "Pass project_id explicitly or configure a default project for the read-plane."
-        )
+        if not explicit_project_id:
+            raise ValueError(
+                f"{tool_name} requires explicit project_id. This is a project-scoped read-plane MCP tool; "
+                "pass project_id explicitly and choose it via list_projects/get_project_info when needed."
+            )
+        return self._validate_known_project(explicit_project_id)
 
     def _resolve_mapping_project_id(self, args: dict[str, Any]) -> str:
         explicit_project_id = str(args.get("project_id") or "").strip()
-        if explicit_project_id:
-            return self._validate_known_project(explicit_project_id)
-
-        workspace_root = str(args.get("workspace_root") or "").strip()
-        if workspace_root and self._project_registry.project_count() > 0:
-            try:
-                resolved = Path(workspace_root).expanduser().resolve()
-            except Exception:
-                resolved = Path(workspace_root)
-            matches = []
-            for project in self._project_registry.list_projects():
-                try:
-                    project_root = Path(project.root_path).resolve()
-                except Exception:
-                    project_root = Path(project.root_path)
-                if resolved == project_root or str(resolved).startswith(str(project_root)) or str(project_root).startswith(str(resolved)):
-                    matches.append(project.project_id)
-            if len(matches) == 1:
-                return matches[0]
-            if len(matches) > 1:
-                raise ValueError(
-                    "workspace_root matches multiple registered projects. Pass project_id explicitly."
-                )
-
-        return self._resolve_project_id(args, tool_name="map_work_item_to_codebase")
+        if not explicit_project_id:
+            raise ValueError(
+                "map_work_item_to_codebase requires explicit project_id. Choose it via list_projects/get_project_info first."
+            )
+        return self._validate_known_project(explicit_project_id)
 
     def _validate_known_project(self, project_id: str) -> str:
-        if self._project_registry.project_count() == 0:
-            return project_id
         return self._project_registry.require_project(project_id).project_id
 
     def _query_symbols(
@@ -1467,9 +1391,8 @@ def tool_rag_context() -> dict[str, Any]:
             "assemblato da codice/documenti indicizzati, pensato per aiutare un agente a lavorare "
             "subito sul codice. Include entry point, core files, supporting matches, contesto "
             "assemblato e hint sui tool di follow-up. Usare solo per context retrieval tecnico; "
-            "non salva memorie operative e non esegue ingest/index refresh. In single-project mode "
-            "puo' usare il default project se configurato in modo sicuro; in multi-project mode "
-            "richiede project_id esplicito e non usa alcun default implicito. Per "
+            "non salva memorie operative e non esegue ingest/index refresh. Richiede sempre "
+            "project_id esplicito e non usa alcun default implicito. Per "
             "write_enabled/ingest_enabled, refresh indice e operazioni di ingest-plane usare "
             "context_info e la CLI operativa."
         ),
@@ -1481,9 +1404,7 @@ def tool_rag_context() -> dict[str, Any]:
                 "project_id": {
                     "type": "string",
                     "description": (
-                        "Project scope per la retrieval. In multi-project mode "
-                        "(multi_project_enabled=true) e' obbligatorio; in single-project mode "
-                        "puo' essere omesso solo se il server supporta un default project sicuro."
+                        "Project scope per la retrieval. E' sempre obbligatorio e deve riferirsi a un progetto registrato nel registry."
                     ),
                 },
                 "top_k": {"type": "integer"},
@@ -1514,8 +1435,7 @@ def tool_rag_search() -> dict[str, Any]:
         "codice/documenti indicizzati senza context assembly. Usarlo per ricerca mirata, "
         "debug del retrieval, conferme puntuali o quando serve vedere i risultati grezzi oltre "
         "il pacchetto principale di rag_context. Non e' un memory store operativo e non esegue "
-        "ingest o refresh indice. In single-project mode puo' usare un default project solo se "
-        "supportato in modo sicuro; in multi-project mode richiede project_id esplicito."
+        "ingest o refresh indice. Richiede sempre project_id esplicito e non usa alcun default implicito."
     )
     tool["inputSchema"]["properties"]["format"]["description"] = "investigation (default) oppure json"
     return tool
@@ -1540,10 +1460,6 @@ def tool_map_work_item_to_codebase() -> dict[str, Any]:
                 "project_id": {
                     "type": "string",
                     "description": "Project scope esplicito. Preferito quando disponibile.",
-                },
-                "workspace_root": {
-                    "type": "string",
-                    "description": "Workspace o repo root locale da usare per risolvere il project scope.",
                 },
                 "path_prefix": {"type": "string"},
                 "doc_type": {"type": "string"},
@@ -1597,9 +1513,8 @@ def tool_symbol_search() -> dict[str, Any]:
             "nel codice indicizzato. E' il tool di precisione da usare dopo rag_context quando "
             "serve disambiguare nomi tecnici, trovare signature/linee esatte o confermare "
             "entry point specifici. E' un tool di read-plane: non aggiorna l'indice e non fa "
-            "operazioni di ingest-plane. In multi-project mode richiede project_id esplicito; in "
-            "single-project mode puo' usare il default project solo se configurato in modo "
-            "sicuro. Restituisce line_start, line_end, signature e path del file."
+            "operazioni di ingest-plane. Richiede sempre project_id esplicito. Restituisce "
+            "line_start, line_end, signature e path del file."
         ),
         "inputSchema": {
             "type": "object",
@@ -1616,9 +1531,7 @@ def tool_symbol_search() -> dict[str, Any]:
                 "project_id": {
                     "type": "string",
                     "description": (
-                        "Project scope per la ricerca simboli. In multi-project mode "
-                        "(multi_project_enabled=true) e' obbligatorio; in single-project mode "
-                        "puo' essere omesso solo se il server espone un default project sicuro."
+                        "Project scope per la ricerca simboli. E' sempre obbligatorio e deve riferirsi a un progetto registrato nel registry."
                     ),
                 },
                 "language": {
@@ -1849,8 +1762,6 @@ def format_context_info_text(payload: dict[str, Any]) -> str:
         "CONTEXT INFO",
         f"server: {payload.get('server') or 'llm-context-mcp'}",
         f"runtime_name: {payload.get('runtime_name') or 'default'}",
-        f"multi_project_enabled: {str(bool(payload.get('multi_project_enabled'))).lower()}",
-        f"default_project_id: {payload.get('default_project_id') or '(none)'}",
         "",
     ]
 

@@ -34,7 +34,7 @@ from rag_indexer.agent_context import build_context
 from rag_indexer.embedder import LocalSentenceTransformerEmbedder
 
 DSN = "postgresql://<user>:<password>@<host>:5432/<database>"
-PROJECT_ID = "myproj"
+PROJECT_ID = "<project_id>"
 embedder = LocalSentenceTransformerEmbedder(
     model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 )
@@ -70,7 +70,7 @@ direttamente il testo da inserire nel prompt:
 ```bash
 python cli.py context \
   --dsn "postgresql://<user>:<password>@<host>:5432/<database>" \
-  --project-id myproj \
+  --project-id <project_id> \
   --text "come funziona bpofh?" \
   --top-k 8 \
   --path-prefix "librerie\\BpoFH\\" \
@@ -86,7 +86,7 @@ Oppure usa direttamente un file/dir:
 ```bash
 python cli.py context \
   --dsn "postgresql://<user>:<password>@<host>:5432/<database>" \
-  --project-id myproj \
+  --project-id <project_id> \
   --text "spiegami il flusso" \
   --top-k 8 \
   --file "librerie\\BpoFH\\Attivita.cs" \
@@ -108,7 +108,7 @@ import psycopg
 from rag_indexer.embedder import LocalSentenceTransformerEmbedder
 
 DSN = "postgresql://<user>:<password>@<host>:5432/<database>"
-PROJECT_ID = "myproj"
+PROJECT_ID = "<project_id>"
 embedder = LocalSentenceTransformerEmbedder(
     model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 )
@@ -139,7 +139,7 @@ for row in rows:
 
 ## Linee guida per l'agente
 
-- Usa `project_id` obbligatorio per isolare il contesto.
+- Usa sempre `project_id` esplicito e gia' registrato nel registry per isolare il contesto.
 - Usa `doc_type` per filtrare (es. `code`) se vuoi ridurre rumore.
 - Non usare dati di test se non richiesti (limita `include_dirs` nel config se necessario).
 
