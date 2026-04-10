@@ -79,33 +79,6 @@ def main() -> None:
     ingest_parser.add_argument("--min-chunk-chars", type=int, default=None)
     ingest_parser.add_argument("--incremental", action="store_true")
 
-    ingest_all_parser = subparsers.add_parser(
-        "ingest-enabled-projects",
-        help="Run ingest for all projects with ingest_enabled=true",
-    )
-    ingest_all_parser.add_argument("--dsn", required=True)
-    ingest_all_parser.add_argument("--include", default=None)
-    ingest_all_parser.add_argument("--exclude", default=None)
-    ingest_all_parser.add_argument("--include-dirs", default=None)
-    ingest_all_parser.add_argument("--assets-template-only", default=None)
-    ingest_all_parser.add_argument("--assets-root-dir", default=None)
-    ingest_all_parser.add_argument("--assets-template-dir", default=None)
-    ingest_all_parser.add_argument("--max-bytes", type=int, default=None)
-    ingest_all_parser.add_argument("--embedding-dim", type=int, default=None)
-    ingest_all_parser.add_argument("--embedder", default="dummy")
-    ingest_all_parser.add_argument("--gemini-api-key", default=None)
-    ingest_all_parser.add_argument("--gemini-model", default="text-embedding-004")
-    ingest_all_parser.add_argument(
-        "--local-model",
-        default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-    )
-    ingest_all_parser.add_argument("--chunk-size", type=int, default=None)
-    ingest_all_parser.add_argument("--chunk-overlap", type=int, default=None)
-    ingest_all_parser.add_argument("--md-chunk-size", type=int, default=None)
-    ingest_all_parser.add_argument("--code-chunk-size", type=int, default=None)
-    ingest_all_parser.add_argument("--min-chunk-chars", type=int, default=None)
-    ingest_all_parser.add_argument("--incremental", action="store_true")
-
     query_parser = subparsers.add_parser("query", help="Vector search")
     query_parser.add_argument("--dsn", required=True)
     query_parser.add_argument("--project-id", required=True)
@@ -183,25 +156,6 @@ def main() -> None:
             f"chunks_inserted={stats.chunks_inserted} "
             f"duration_sec={stats.duration_sec:.2f}"
         )
-        return
-
-    if args.command == "ingest-enabled-projects":
-        _require_ingest_enabled(config)
-        enabled_projects = registry.list_enabled_for_ingest()
-        if not enabled_projects:
-            raise RuntimeError("No projects are enabled for ingest in the project registry")
-        for project in enabled_projects:
-            stats = _run_ingest_command(args, config, registry, project.project_id)
-            print(
-                f"[{project.project_id}] "
-                f"deleted={stats.deleted_rows} "
-                f"files_scanned={stats.files_scanned} "
-                f"files_indexed={stats.files_indexed} "
-                f"files_skipped={stats.files_skipped} "
-                f"chunks_created={stats.chunks_created} "
-                f"chunks_inserted={stats.chunks_inserted} "
-                f"duration_sec={stats.duration_sec:.2f}"
-            )
         return
 
     if args.command == "query":
@@ -539,12 +493,6 @@ def _run_ingest_command(args, config, registry: ProjectRegistry, project_id: str
 
 
 def _resolve_ingest_project(registry: ProjectRegistry, project_id: str) -> ProjectRecord:
-    if registry.project_count() == 0:
-        return ProjectRecord(
-            project_id=project_id,
-            display_name=project_id,
-            root_path=Path(".").resolve(),
-        )
     return registry.require_project(project_id)
 
 

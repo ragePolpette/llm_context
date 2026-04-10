@@ -9,7 +9,7 @@ It is built for RAG-style lookup over repositories and technical document sets, 
 - indexes code and documents into a local vector-backed retrieval store
 - supports technical retrieval through MCP tools such as `rag_context`, `rag_search`, and `symbol_search`
 - separates read-plane retrieval from write-plane ingest
-- supports explicit project discovery and multi-project configuration
+- supports project discovery through a registry and explicit project selection
 - keeps retrieval focused on local infrastructure and local embeddings
 
 ## Why It Exists
@@ -47,7 +47,7 @@ In other words, this repository trades some simplicity for a storage model that 
 ## Core Concepts
 
 - Read-plane vs write-plane: retrieval is exposed through MCP; ingest remains an operational capability
-- Single-project vs multi-project mode: legacy-safe defaults or explicit project selection
+- Explicit project registry: every ingest and retrieval operation is project-scoped
 - Incremental ingest: only changed files need to be reprocessed
 - Local embeddings: the intended path is local embedding generation, not hosted inference
 
@@ -94,7 +94,7 @@ MCP context tools
 
 `pgvector` was chosen here because the repository is not trying to be the smallest possible local demo. It is trying to support a larger retrieval surface derived from real code and documentation, including multi-project indexing where SQLite was no longer a comfortable default.
 
-For a smaller single-project prototype, SQLite can still be a reasonable choice. For this codebase, PostgreSQL plus `pgvector` was the more honest fit.
+For a smaller prototype, SQLite can still be a reasonable choice. For this codebase, PostgreSQL plus `pgvector` was the more honest fit.
 
 ## Local Run
 
@@ -127,7 +127,6 @@ Example operational CLI flows:
 ```bash
 python cli.py --config config.yaml list-projects --json
 python cli.py --config config.ingest.yaml ingest --dsn <dsn> --project-id <project_id>
-python cli.py --config config.ingest.yaml ingest-enabled-projects --dsn <dsn>
 ```
 
 ## Configuration Model
@@ -135,13 +134,13 @@ python cli.py --config config.ingest.yaml ingest-enabled-projects --dsn <dsn>
 Key files:
 
 - `config.example.yaml`
-- `config.local.example.env`
 - `projects.example.yaml`
 
 Important runtime ideas:
 
-- `multi_project_enabled`
-- `default_project_id`
+- `projects_registry_path`
+- `projects_state_path`
+- explicit `project_id` on every ingest and MCP retrieval call
 - `projects_registry_path`
 - `projects_state_path`
 - `ingest_enabled`

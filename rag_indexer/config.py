@@ -70,8 +70,6 @@ class AppConfig:
     exclude_globs: list[str] = field(default_factory=list)
     never_index_ext: list[str] = field(default_factory=list)
     symbol_search_enabled: bool = True
-    multi_project_enabled: bool = False
-    default_project_id: str = "myproj"
     projects_registry_path: Path = field(default_factory=lambda: Path("projects.yaml"))
     projects_state_path: Path = field(default_factory=lambda: Path("projects.state.json"))
     ingest_enabled: bool = False

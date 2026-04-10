@@ -185,8 +185,6 @@ scope_map:
   librerie\\Fiscobot\\:
     - docconta
     - registrazione contabile
-multi_project_enabled: false
-default_project_id: myproj
 projects_registry_path: projects.yaml
 projects_state_path: projects.state.json
 ingest_enabled: false
