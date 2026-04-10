@@ -84,44 +84,6 @@ def test_ingest_command_rejects_unknown_project(monkeypatch, tmp_path):
         cli.main()
 
 
-def test_ingest_enabled_projects_runs_only_enabled_projects(monkeypatch, tmp_path, capsys):
-    config_path = _write_cli_config(tmp_path, ingest_enabled=True)
-    called = []
-
-    def fake_run_ingest_command(args, config, registry, project_id):
-        called.append(project_id)
-        return SimpleNamespace(
-            deleted_rows=0,
-            files_scanned=10,
-            files_indexed=5,
-            files_skipped=5,
-            chunks_created=20,
-            chunks_inserted=20,
-            duration_sec=1.5,
-        )
-
-    monkeypatch.setattr(cli, "_run_ingest_command", fake_run_ingest_command)
-    monkeypatch.setattr(
-        cli.sys,
-        "argv",
-        [
-            "cli.py",
-            "--config",
-            str(config_path),
-            "ingest-enabled-projects",
-            "--dsn",
-            "postgresql://ctx",
-        ],
-    )
-
-    cli.main()
-    output = capsys.readouterr().out
-
-    assert called == ["alpha"]
-    assert "[alpha]" in output
-
-
-
 def test_run_ingest_command_allows_registered_repo_root_project(monkeypatch, tmp_path):
     config_path = _write_cli_config(
         tmp_path,

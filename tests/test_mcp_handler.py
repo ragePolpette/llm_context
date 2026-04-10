@@ -43,7 +43,7 @@ def no_warmup(monkeypatch):
     monkeypatch.setattr(MCPHandler, "_warmup_embedder", lambda self: None)
 
 
-def test_handler_requires_default_dsn(monkeypatch, no_warmup):
+def test_handler_requires_default_dsn(monkeypatch, no_warmup, tmp_path):
     monkeypatch.delenv("LLM_CONTEXT_DSN", raising=False)
 
     with pytest.raises(RuntimeError, match="LLM_CONTEXT_DSN is required"):
@@ -60,7 +60,7 @@ def test_tool_schemas_do_not_expose_dsn():
     assert "dsn" not in mapping_props
 
 
-def test_rag_context_uses_configured_default_dsn(monkeypatch, no_warmup):
+def test_rag_context_uses_configured_default_dsn(monkeypatch, no_warmup, tmp_path):
     captured = {}
 
     def fake_build_context(**kwargs):
@@ -68,23 +68,24 @@ def test_rag_context_uses_configured_default_dsn(monkeypatch, no_warmup):
         return "ctx", []
 
     monkeypatch.setattr(mcp_handler_module, "build_context", fake_build_context)
-    handler = MCPHandler()
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
     monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [])
 
     payload = handler._run_rag_context(
         {
             "query_text": "legacylib",
+            "project_id": "alpha",
             "dsn": "postgresql://evil:evil@remote:5432/other",
         }
     )
 
     assert captured["dsn"] == "postgresql://ctx_user:ctx_pass@localhost:5432/postgres"
-    assert payload["meta"]["project_id"] == "myproj"
+    assert payload["meta"]["project_id"] == "alpha"
     assert "functional_context" in payload
 
 
-def test_rag_context_retries_without_auto_scope_when_derived_prefix_has_no_hits(monkeypatch, no_warmup):
+def test_rag_context_retries_without_auto_scope_when_derived_prefix_has_no_hits(monkeypatch, no_warmup, tmp_path):
     calls = []
 
     def fake_build_context(**kwargs):
@@ -96,11 +97,11 @@ def test_rag_context_retries_without_auto_scope_when_derived_prefix_has_no_hits(
     monkeypatch.setattr(mcp_handler_module, "build_context", fake_build_context)
     monkeypatch.setattr(mcp_handler_module, "resolve_path_prefix", lambda **kwargs: "src/api/controllers/BillingController.cs")
     monkeypatch.setattr(mcp_handler_module, "format_context_sheet", lambda **kwargs: "sheet")
-    handler = MCPHandler()
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
     monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [])
 
-    payload = handler._run_rag_context({"query_text": "GenerateInvoice fatturazione studi"})
+    payload = handler._run_rag_context({"query_text": "GenerateInvoice fatturazione studi", "project_id": "alpha"})
 
     assert calls == ["src/api/controllers/BillingController.cs", None]
     assert payload["meta"]["auto_scope_fallback_used"] is True
@@ -108,7 +109,7 @@ def test_rag_context_retries_without_auto_scope_when_derived_prefix_has_no_hits(
     assert payload["meta"]["path_prefix"] is None
 
 
-def test_rag_context_does_not_retry_when_path_prefix_is_explicit(monkeypatch, no_warmup):
+def test_rag_context_does_not_retry_when_path_prefix_is_explicit(monkeypatch, no_warmup, tmp_path):
     calls = []
 
     def fake_build_context(**kwargs):
@@ -117,19 +118,19 @@ def test_rag_context_does_not_retry_when_path_prefix_is_explicit(monkeypatch, no
 
     monkeypatch.setattr(mcp_handler_module, "build_context", fake_build_context)
     monkeypatch.setattr(mcp_handler_module, "format_context_sheet", lambda **kwargs: "sheet")
-    handler = MCPHandler()
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
     monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [])
 
     payload = handler._run_rag_context(
-        {"query_text": "GenerateInvoice", "path_prefix": "src/api/controllers/BillingController.cs"}
+        {"query_text": "GenerateInvoice", "project_id": "alpha", "path_prefix": "src/api/controllers/BillingController.cs"}
     )
 
     assert calls == ["src\\api\\controllers\\BillingController.cs"]
     assert payload["meta"]["auto_scope_fallback_used"] is False
 
 
-def test_rag_context_builds_symbol_follow_up_from_core_file_roles(monkeypatch, no_warmup):
+def test_rag_context_builds_symbol_follow_up_from_core_file_roles(monkeypatch, no_warmup, tmp_path):
     retrieval_results = [
         {
             "source_path": "src/api/controllers/BillingController.cs",
@@ -194,11 +195,11 @@ def test_rag_context_builds_symbol_follow_up_from_core_file_roles(monkeypatch, n
 
     monkeypatch.setattr(mcp_handler_module, "build_context", lambda **kwargs: ("ctx", retrieval_results))
     monkeypatch.setattr(mcp_handler_module, "format_context_sheet", lambda **kwargs: "sheet")
-    handler = MCPHandler()
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
     monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: symbol_results)
 
-    payload = handler._run_rag_context({"query_text": "GenerateInvoice billing api"})
+    payload = handler._run_rag_context({"query_text": "GenerateInvoice billing api", "project_id": "alpha"})
 
     symbol_follow_up = payload["functional_context"]["tool_hints"]["symbol_follow_up"]
     suggested_queries = symbol_follow_up["suggested_queries"]
@@ -223,14 +224,14 @@ def test_rag_context_builds_symbol_follow_up_from_core_file_roles(monkeypatch, n
     assert payload["functional_context"]["tool_hints"]["recommended_follow_up"][0]["suggested_queries"][0]["name"] == "GenerateInvoice"
 
 
-def test_rag_context_symbol_follow_up_falls_back_to_query_candidates(monkeypatch, no_warmup):
+def test_rag_context_symbol_follow_up_falls_back_to_query_candidates(monkeypatch, no_warmup, tmp_path):
     monkeypatch.setattr(mcp_handler_module, "build_context", lambda **kwargs: ("ctx", []))
     monkeypatch.setattr(mcp_handler_module, "format_context_sheet", lambda **kwargs: "sheet")
-    handler = MCPHandler()
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
     monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [])
 
-    payload = handler._run_rag_context({"query_text": "Apri GenerateInvoice e IFatture"})
+    payload = handler._run_rag_context({"query_text": "Apri GenerateInvoice e IFatture", "project_id": "alpha"})
 
     suggested_queries = payload["functional_context"]["tool_hints"]["symbol_follow_up"]["suggested_queries"]
 
@@ -239,7 +240,7 @@ def test_rag_context_symbol_follow_up_falls_back_to_query_candidates(monkeypatch
     assert all(item["source_role"] == "query_candidate" for item in suggested_queries)
 
 
-def test_rag_search_returns_investigation_payload(monkeypatch, no_warmup):
+def test_rag_search_returns_investigation_payload(monkeypatch, no_warmup, tmp_path):
     retrieval_results = [
         {
             "source_path": "src/api/controllers/BillingController.cs",
@@ -288,11 +289,11 @@ def test_rag_search_returns_investigation_payload(monkeypatch, no_warmup):
 
     monkeypatch.setattr(mcp_handler_module, "build_context", lambda **kwargs: ("ctx", retrieval_results))
     monkeypatch.setattr(mcp_handler_module, "format_context_sheet", lambda **kwargs: "sheet")
-    handler = MCPHandler()
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
     monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: symbol_results)
 
-    payload = handler._run_rag_search({"query_text": "GenerateInvoice fattura api"})
+    payload = handler._run_rag_search({"query_text": "GenerateInvoice fattura api", "project_id": "alpha"})
 
     assert payload["summary"]["result_count"] == 3
     assert payload["summary"]["unique_file_count"] == 2
@@ -304,7 +305,7 @@ def test_rag_search_returns_investigation_payload(monkeypatch, no_warmup):
     assert payload["investigation_hints"]["suggested_symbol_queries"][0]["name"] == "GenerateInvoice"
 
 
-def test_symbol_search_uses_configured_default_dsn(monkeypatch, no_warmup):
+def test_symbol_search_uses_configured_default_dsn(monkeypatch, no_warmup, tmp_path):
     captured = {}
 
     class FakeConn:
@@ -326,10 +327,11 @@ def test_symbol_search_uses_configured_default_dsn(monkeypatch, no_warmup):
     monkeypatch.setattr(mcp_handler_module, "get_connection", fake_get_connection)
     monkeypatch.setattr(mcp_handler_module, "RagStore", FakeStore)
 
-    handler = MCPHandler()
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     payload = handler._run_symbol_search(
         {
             "name": "MenuService",
+            "project_id": "alpha",
             "dsn": "postgresql://evil:evil@remote:5432/other",
         }
     )
@@ -339,8 +341,8 @@ def test_symbol_search_uses_configured_default_dsn(monkeypatch, no_warmup):
     assert payload["count"] == 1
 
 
-def test_context_info_exposes_tool_map_and_usage_notes(no_warmup):
-    handler = MCPHandler()
+def test_context_info_exposes_tool_map_and_usage_notes(no_warmup, tmp_path):
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
 
     payload = handler._run_context_info()
 
@@ -412,8 +414,6 @@ def test_format_tool_text_formats_context_info_as_decision_guide():
         {
             "server": "llm-context-mcp",
             "runtime_name": "llm-context",
-            "multi_project_enabled": True,
-            "default_project_id": "llm_context",
             "database_runtime": {
                 "reachable": True,
                 "database": "llm_context",
@@ -504,7 +504,7 @@ def test_format_tool_text_formats_rag_search_as_investigation_summary():
     assert "symbol_search: method GenerateInvoice exact=true" in text
 
 
-def test_symbol_search_uses_pool_when_available(monkeypatch, no_warmup):
+def test_symbol_search_uses_pool_when_available(monkeypatch, no_warmup, tmp_path):
     captured = {}
 
     class FakeConn:
@@ -539,8 +539,8 @@ def test_symbol_search_uses_pool_when_available(monkeypatch, no_warmup):
     monkeypatch.setattr(mcp_handler_module, "get_connection", unexpected_get_connection)
     monkeypatch.setattr(mcp_handler_module, "RagStore", FakeStore)
 
-    handler = MCPHandler()
-    payload = handler._run_symbol_search({"name": "MenuService"})
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    payload = handler._run_symbol_search({"name": "MenuService", "project_id": "alpha"})
 
     assert captured["used_pool"] is True
     assert captured["entered"] is True
@@ -550,7 +550,7 @@ def test_symbol_search_uses_pool_when_available(monkeypatch, no_warmup):
 
 def test_symbol_search_falls_back_to_direct_connection_when_pool_connection_fails(
     monkeypatch, no_warmup
-):
+, tmp_path):
     captured = {}
 
     class FakeConn:
@@ -586,8 +586,8 @@ def test_symbol_search_falls_back_to_direct_connection_when_pool_connection_fail
     monkeypatch.setattr(mcp_handler_module, "get_connection", fake_get_connection)
     monkeypatch.setattr(mcp_handler_module, "RagStore", FakeStore)
 
-    handler = MCPHandler()
-    payload = handler._run_symbol_search({"name": "MenuService"})
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    payload = handler._run_symbol_search({"name": "MenuService", "project_id": "alpha"})
 
     assert captured["used_pool"] is True
     assert captured["dsn"] == "postgresql://ctx_user:ctx_pass@localhost:5432/postgres"
@@ -595,33 +595,35 @@ def test_symbol_search_falls_back_to_direct_connection_when_pool_connection_fail
     assert payload["count"] == 1
 
 
-def test_rag_context_rejects_oversized_query_embedding(monkeypatch, no_warmup):
-    handler = MCPHandler()
+def test_rag_context_rejects_oversized_query_embedding(monkeypatch, no_warmup, tmp_path):
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
 
     with pytest.raises(ValueError, match="exceeds maximum allowed length"):
         handler._run_rag_context(
             {
+                "project_id": "alpha",
                 "query_embedding": [0.1] * 17,
                 "embedding_dim": 17,
             }
         )
 
 
-def test_rag_context_rejects_embedding_length_mismatch(monkeypatch, no_warmup):
-    handler = MCPHandler()
+def test_rag_context_rejects_embedding_length_mismatch(monkeypatch, no_warmup, tmp_path):
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
 
     with pytest.raises(ValueError, match="length mismatch"):
         handler._run_rag_context(
             {
+                "project_id": "alpha",
                 "query_embedding": [0.1] * 8,
                 "embedding_dim": 4,
             }
         )
 
 
-def _write_multi_project_config(tmp_path, *, multi_project_enabled=True, default_project_id="alpha"):
+def _write_multi_project_config(tmp_path):
     projects_path = tmp_path / "projects.yaml"
     projects_path.write_text(
         yaml.safe_dump(
@@ -648,8 +650,6 @@ def _write_multi_project_config(tmp_path, *, multi_project_enabled=True, default
     config_path.write_text(
         yaml.safe_dump(
             {
-                "multi_project_enabled": multi_project_enabled,
-                "default_project_id": default_project_id,
                 "projects_registry_path": str(projects_path.name),
                 "projects_state_path": "projects.state.json",
             }
@@ -683,7 +683,6 @@ def test_list_projects_returns_registered_projects(monkeypatch, no_warmup, tmp_p
     payload = handler._run_list_projects()
 
     assert payload["count"] == 2
-    assert payload["multi_project_enabled"] is True
     assert payload["projects"][0]["index_manifest"]["indexed_documents"] == 6
     assert payload["projects"][0]["integrity"]["status"] == "ok"
 
@@ -751,40 +750,6 @@ def test_map_work_item_to_codebase_returns_structured_mapping(monkeypatch, no_wa
     assert payload["paths"][0] == "pubblico\\api\\Controllers\\Fattura.cs"
 
 
-def test_map_work_item_to_codebase_accepts_workspace_root(monkeypatch, no_warmup, tmp_path):
-    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
-
-    monkeypatch.setattr(
-        handler,
-        "_run_rag_context",
-        lambda args, tool_name="rag_context": {
-            "functional_context": {
-                "summary": {
-                    "core_file_count": 0,
-                    "supporting_match_count": 0,
-                    "symbol_hit_count": 0,
-                },
-                "entry_points": [],
-                "core_files": [],
-                "supporting_matches": [],
-            }
-        },
-    )
-
-    alpha_root = handler._project_registry.require_project("alpha").root_path
-    payload = handler._run_map_work_item_to_codebase(
-        {
-            "summary": "Ticket senza hit",
-            "workspace_root": str(alpha_root),
-        }
-    )
-
-    assert payload["project_id"] == "alpha"
-    assert payload["in_scope"] is False
-    assert payload["feasibility"] in {"blocked", "out_of_scope"}
-    assert payload["blockers"]
-
-
 def test_get_project_info_returns_registry_entry(monkeypatch, no_warmup, tmp_path):
     handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
 
@@ -844,7 +809,7 @@ def test_get_project_info_marks_missing_manifest_as_unreliable(monkeypatch, no_w
     assert "runtime_state_has_index_but_manifest_missing" in payload["integrity"]["reasons"]
 
 
-def test_multi_project_mode_requires_explicit_project_id(monkeypatch, no_warmup, tmp_path):
+def test_read_plane_tools_require_explicit_project_id(monkeypatch, no_warmup, tmp_path):
     handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
 
@@ -852,30 +817,6 @@ def test_multi_project_mode_requires_explicit_project_id(monkeypatch, no_warmup,
         handler._run_rag_context({"query_text": "legacylib"})
 
 
-def test_single_project_mode_keeps_safe_default_fallback(monkeypatch, no_warmup, tmp_path):
-    captured = {}
-
-    def fake_build_context(**kwargs):
-        captured["project_id"] = kwargs["project_id"]
-        return "ctx", []
-
-    monkeypatch.setattr(mcp_handler_module, "build_context", fake_build_context)
-    handler = MCPHandler(
-        config_path=str(
-            _write_multi_project_config(
-                tmp_path,
-                multi_project_enabled=False,
-                default_project_id="alpha",
-            )
-        )
-    )
-    monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
-    monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [])
-
-    payload = handler._run_rag_context({"query_text": "legacylib"})
-
-    assert captured["project_id"] == "alpha"
-    assert payload["meta"]["project_id"] == "alpha"
 
 
 def test_rag_context_default_format_returns_functional_text():
@@ -930,11 +871,11 @@ def test_rag_context_default_format_returns_functional_text():
     assert "ASSEMBLED CONTEXT" in text
 
 
-def test_rag_context_payload_exposes_tool_hints(monkeypatch, no_warmup):
+def test_rag_context_payload_exposes_tool_hints(monkeypatch, no_warmup, tmp_path):
     def fake_build_context(**kwargs):
         return "ctx", [{"source_path": "a.cs", "score": 0.9, "text": "x"}]
 
-    handler = MCPHandler()
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     monkeypatch.setattr(mcp_handler_module, "build_context", fake_build_context)
     monkeypatch.setattr(mcp_handler_module, "format_context_sheet", lambda **kwargs: "sheet")
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
@@ -953,7 +894,7 @@ def test_rag_context_payload_exposes_tool_hints(monkeypatch, no_warmup):
         ],
     )
 
-    payload = handler._run_rag_context({"query_text": "GenerateInvoice"})
+    payload = handler._run_rag_context({"query_text": "GenerateInvoice", "project_id": "alpha"})
 
     tool_hints = payload["functional_context"]["tool_hints"]
     assert tool_hints["primary_tool"] == "rag_context"
@@ -975,16 +916,16 @@ def test_rag_context_legacy_format_returns_legacy_context():
     assert text == "legacy ctx"
 
 
-def test_rag_search_returns_raw_results_without_formatted_context(monkeypatch, no_warmup):
+def test_rag_search_returns_raw_results_without_formatted_context(monkeypatch, no_warmup, tmp_path):
     def fake_build_context(**kwargs):
         return "ctx", [{"source_path": "a.cs", "score": 0.9, "text": "x"}]
 
     monkeypatch.setattr(mcp_handler_module, "build_context", fake_build_context)
-    handler = MCPHandler()
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
     monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [{"name": "X"}])
 
-    payload = handler._run_rag_search({"query_text": "fatturazione"})
+    payload = handler._run_rag_search({"query_text": "fatturazione", "project_id": "alpha"})
 
     assert "context" not in payload
     assert "context_sheet" not in payload
@@ -1021,7 +962,6 @@ def test_context_operational_status_exposes_project_summary(monkeypatch, no_warm
     assert payload["runtime_name"] == "default"
     assert payload["storage_target"]["database"] == "postgres"
     assert payload["project_manifest_dir"].endswith("project_manifests")
-    assert payload["multi_project_enabled"] is True
     assert payload["project_count"] == 2
     assert payload["projects"][0]["project_id"] == "alpha"
     assert payload["projects"][0]["index_manifest"]["indexed_documents"] == 7
@@ -1307,14 +1247,14 @@ def test_context_operational_status_marks_not_indexed_projects_as_blocked(
     assert "registered_projects_are_not_indexed" in payload["runtime_readiness"]["warnings"]
 
 
-def test_storage_target_summary_marks_dedicated_database(monkeypatch, no_warmup):
+def test_storage_target_summary_marks_dedicated_database(monkeypatch, no_warmup, tmp_path):
     monkeypatch.setenv(
         "LLM_CONTEXT_DSN",
         "postgresql://ctx_user:ctx_pass@localhost:5432/llm_context",
     )
     monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "llm-context-local-pg")
 
-    handler = MCPHandler()
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     payload = handler.get_operational_status(ready=True)
 
     assert payload["storage_target"]["name"] == "llm-context-local-pg"
@@ -1323,13 +1263,13 @@ def test_storage_target_summary_marks_dedicated_database(monkeypatch, no_warmup)
     assert payload["storage_target"]["deployment_hint"] == "local_or_docker_port_mapping"
 
 
-def test_storage_target_summary_marks_docker_alias_target(monkeypatch, no_warmup):
+def test_storage_target_summary_marks_docker_alias_target(monkeypatch, no_warmup, tmp_path):
     monkeypatch.setenv(
         "LLM_CONTEXT_DSN",
         "postgresql://ctx_user:ctx_pass@host.docker.internal:5432/llm_context",
     )
 
-    handler = MCPHandler()
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     payload = handler.get_operational_status(ready=True)
 
     assert payload["storage_target"]["network_scope"] == "docker_alias"
