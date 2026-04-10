@@ -121,6 +121,89 @@ def test_ingest_enabled_projects_runs_only_enabled_projects(monkeypatch, tmp_pat
     assert "[alpha]" in output
 
 
+
+def test_run_ingest_command_allows_registered_repo_root_project(monkeypatch, tmp_path):
+    config_path = _write_cli_config(
+        tmp_path,
+        ingest_enabled=True,
+        projects=[
+            {
+                "project_id": "llm_context",
+                "display_name": "LLM Context",
+                "root_path": ".",
+                "include_dirs": ["rag_indexer"],
+                "ingest_enabled": True,
+            }
+        ],
+    )
+    config = cli.load_config(str(config_path))
+    registry = cli.load_project_registry(
+        config.projects_registry_path,
+        config.projects_state_path,
+    )
+    captured = {}
+
+    class FakeConn:
+        def close(self):
+            return None
+
+    class FakeStore:
+        def __init__(self, conn, embedding_dim):
+            self.embedding_dim = embedding_dim
+
+        def get_repo_stats(self, repo_id):
+            assert repo_id == "llm_context"
+            return {
+                "indexed_documents": 1,
+                "indexed_chunks": 2,
+                "indexed_symbols": 0,
+            }
+
+    def fake_ingest_project_v2(**kwargs):
+        captured["root"] = str(kwargs["root"])
+        return SimpleNamespace(
+            deleted_rows=0,
+            files_scanned=3,
+            files_indexed=1,
+            files_skipped=2,
+            chunks_created=2,
+            chunks_inserted=2,
+            duration_sec=0.5,
+        )
+
+    monkeypatch.setattr(cli, "_build_embedder", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "get_connection", lambda dsn: FakeConn())
+    monkeypatch.setattr(cli, "RagStore", FakeStore)
+    monkeypatch.setattr(cli, "ingest_project_v2", fake_ingest_project_v2)
+
+    args = SimpleNamespace(
+        dsn="postgresql://ctx",
+        embedder="dummy",
+        embedding_dim=None,
+        gemini_api_key=None,
+        gemini_model="text-embedding-004",
+        local_model="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        root=None,
+        include=None,
+        exclude=None,
+        include_dirs=None,
+        assets_template_only=None,
+        assets_root_dir=None,
+        assets_template_dir=None,
+        max_bytes=None,
+        chunk_size=None,
+        chunk_overlap=None,
+        md_chunk_size=None,
+        code_chunk_size=None,
+        min_chunk_chars=None,
+        incremental=False,
+    )
+
+    stats = cli._run_ingest_command(args, config, registry, "llm_context")
+
+    assert stats.files_indexed == 1
+    assert captured["root"] == str(tmp_path.resolve())
+
 def test_run_ingest_command_updates_project_runtime_state(monkeypatch, tmp_path):
     config_path = _write_cli_config(tmp_path, ingest_enabled=True)
     config = cli.load_config(str(config_path))
@@ -200,5 +283,4 @@ def test_run_ingest_command_updates_project_runtime_state(monkeypatch, tmp_path)
     assert reloaded.index_manifest.indexed_documents == 4
     assert reloaded.index_manifest.indexed_chunks == 8
     assert reloaded.index_manifest.indexed_symbols == 2
-
 
