@@ -17,8 +17,9 @@ projects:
       - "*.env*"
       - ".local/**"
       - "mcp_server.err.log"
-    ingest_enabled: false
+    ingest_enabled: true
     write_enabled: false
+
 
 
 
