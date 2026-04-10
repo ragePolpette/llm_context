@@ -225,4 +225,3 @@ def test_resolve_runtime_config_path_returns_none_when_not_set(monkeypatch):
 
     assert mcp_server_http._resolve_runtime_config_path() is None
 
-
