@@ -411,12 +411,12 @@ def test_format_tool_text_formats_context_info_as_decision_guide():
         {},
         {
             "server": "llm-context-mcp",
-            "runtime_name": "rework",
+            "runtime_name": "llm-context",
             "multi_project_enabled": True,
-            "default_project_id": "llm_context_rework",
+            "default_project_id": "llm_context",
             "database_runtime": {
                 "reachable": True,
-                "database": "llm_context_rework",
+                "database": "llm_context",
                 "deployment_hint": "remote_or_managed_postgres",
                 "network_scope": "remote_hostname",
                 "server_version": "16.0",
@@ -1033,7 +1033,7 @@ def test_context_operational_status_marks_storage_target_mismatch_as_stale(
 ):
     monkeypatch.setenv(
         "LLM_CONTEXT_DSN",
-        "postgresql://ctx_user:ctx_pass@localhost:5432/llm_context_rework",
+        "postgresql://ctx_user:ctx_pass@localhost:5432/llm_context",
     )
     handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     handler._project_registry.save_runtime_state(
@@ -1068,9 +1068,9 @@ def test_context_operational_status_marks_runtime_readiness_ready(
 ):
     monkeypatch.setenv(
         "LLM_CONTEXT_DSN",
-        "postgresql://ctx_user:ctx_pass@localhost:5432/llm_context_rework",
+        "postgresql://ctx_user:ctx_pass@localhost:5432/llm_context",
     )
-    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "rework-local-pg")
+    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "llm-context-local-pg")
     handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     handler._project_registry.save_runtime_state(
         "alpha",
@@ -1087,8 +1087,8 @@ def test_context_operational_status_marks_runtime_readiness_ready(
             "last_ingest_completed_at": "2026-03-27T13:00:00Z",
             "index_fingerprint": "idx-alpha",
             "store_target": {
-                "name": "rework-local-pg",
-                "database": "llm_context_rework",
+                "name": "llm-context-local-pg",
+                "database": "llm_context",
             },
         },
     )
@@ -1107,8 +1107,8 @@ def test_context_operational_status_marks_runtime_readiness_ready(
             "last_ingest_completed_at": "2026-03-27T13:00:00Z",
             "index_fingerprint": "idx-beta",
             "store_target": {
-                "name": "rework-local-pg",
-                "database": "llm_context_rework",
+                "name": "llm-context-local-pg",
+                "database": "llm_context",
             },
         },
     )
@@ -1126,9 +1126,9 @@ def test_context_operational_status_marks_database_unreachable_as_blocked(
 ):
     monkeypatch.setenv(
         "LLM_CONTEXT_DSN",
-        "postgresql://ctx_user:ctx_pass@db-host:5432/llm_context_rework",
+        "postgresql://ctx_user:ctx_pass@db-host:5432/llm_context",
     )
-    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "rework-local-pg")
+    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "llm-context-local-pg")
     handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     handler._project_registry.save_runtime_state(
         "alpha",
@@ -1145,8 +1145,8 @@ def test_context_operational_status_marks_database_unreachable_as_blocked(
             "last_ingest_completed_at": "2026-03-27T13:00:00Z",
             "index_fingerprint": "idx-alpha",
             "store_target": {
-                "name": "rework-local-pg",
-                "database": "llm_context_rework",
+                "name": "llm-context-local-pg",
+                "database": "llm_context",
             },
         },
     )
@@ -1181,9 +1181,9 @@ def test_context_operational_status_marks_pgvector_missing_as_blocked(
 ):
     monkeypatch.setenv(
         "LLM_CONTEXT_DSN",
-        "postgresql://ctx_user:ctx_pass@db-host:5432/llm_context_rework",
+        "postgresql://ctx_user:ctx_pass@db-host:5432/llm_context",
     )
-    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "rework-local-pg")
+    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "llm-context-local-pg")
     handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     handler._project_registry.save_runtime_state(
         "alpha",
@@ -1200,8 +1200,8 @@ def test_context_operational_status_marks_pgvector_missing_as_blocked(
             "last_ingest_completed_at": "2026-03-27T13:00:00Z",
             "index_fingerprint": "idx-alpha",
             "store_target": {
-                "name": "rework-local-pg",
-                "database": "llm_context_rework",
+                "name": "llm-context-local-pg",
+                "database": "llm_context",
             },
         },
     )
@@ -1210,7 +1210,7 @@ def test_context_operational_status_marks_pgvector_missing_as_blocked(
         "_get_database_runtime_summary",
         lambda refresh=False: {
             "reachable": True,
-            "database": "llm_context_rework",
+            "database": "llm_context",
             "server_version": "16.0",
             "pgvector_available": False,
             "schema_ready": True,
@@ -1240,9 +1240,9 @@ def test_context_operational_status_marks_missing_schema_as_blocked(
 ):
     monkeypatch.setenv(
         "LLM_CONTEXT_DSN",
-        "postgresql://ctx_user:ctx_pass@db-host:5432/llm_context_rework",
+        "postgresql://ctx_user:ctx_pass@db-host:5432/llm_context",
     )
-    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "rework-local-pg")
+    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "llm-context-local-pg")
     handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     handler._project_registry.save_runtime_state(
         "alpha",
@@ -1259,8 +1259,8 @@ def test_context_operational_status_marks_missing_schema_as_blocked(
             "last_ingest_completed_at": "2026-03-27T13:00:00Z",
             "index_fingerprint": "idx-alpha",
             "store_target": {
-                "name": "rework-local-pg",
-                "database": "llm_context_rework",
+                "name": "llm-context-local-pg",
+                "database": "llm_context",
             },
         },
     )
@@ -1269,7 +1269,7 @@ def test_context_operational_status_marks_missing_schema_as_blocked(
         "_get_database_runtime_summary",
         lambda refresh=False: {
             "reachable": True,
-            "database": "llm_context_rework",
+            "database": "llm_context",
             "server_version": "16.0",
             "pgvector_available": True,
             "schema_ready": False,
@@ -1310,15 +1310,15 @@ def test_context_operational_status_marks_not_indexed_projects_as_blocked(
 def test_storage_target_summary_marks_dedicated_database(monkeypatch, no_warmup):
     monkeypatch.setenv(
         "LLM_CONTEXT_DSN",
-        "postgresql://ctx_user:ctx_pass@localhost:5432/llm_context_rework",
+        "postgresql://ctx_user:ctx_pass@localhost:5432/llm_context",
     )
-    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "rework-local-pg")
+    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "llm-context-local-pg")
 
     handler = MCPHandler()
     payload = handler.get_operational_status(ready=True)
 
-    assert payload["storage_target"]["name"] == "rework-local-pg"
-    assert payload["storage_target"]["database"] == "llm_context_rework"
+    assert payload["storage_target"]["name"] == "llm-context-local-pg"
+    assert payload["storage_target"]["database"] == "llm_context"
     assert payload["storage_target"]["dedicated_candidate"] is True
     assert payload["storage_target"]["deployment_hint"] == "local_or_docker_port_mapping"
 
@@ -1326,7 +1326,7 @@ def test_storage_target_summary_marks_dedicated_database(monkeypatch, no_warmup)
 def test_storage_target_summary_marks_docker_alias_target(monkeypatch, no_warmup):
     monkeypatch.setenv(
         "LLM_CONTEXT_DSN",
-        "postgresql://ctx_user:ctx_pass@host.docker.internal:5432/llm_context_rework",
+        "postgresql://ctx_user:ctx_pass@host.docker.internal:5432/llm_context",
     )
 
     handler = MCPHandler()
@@ -1341,9 +1341,9 @@ def test_database_unreachable_localhost_suggests_local_or_docker_runbook(
 ):
     monkeypatch.setenv(
         "LLM_CONTEXT_DSN",
-        "postgresql://ctx_user:ctx_pass@127.0.0.1:5432/llm_context_rework",
+        "postgresql://ctx_user:ctx_pass@127.0.0.1:5432/llm_context",
     )
-    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "rework-local-pg")
+    monkeypatch.setenv("LLM_CONTEXT_STORE_TARGET", "llm-context-local-pg")
     handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
     handler._project_registry.save_runtime_state(
         "alpha",
@@ -1360,8 +1360,8 @@ def test_database_unreachable_localhost_suggests_local_or_docker_runbook(
             "last_ingest_completed_at": "2026-03-27T13:00:00Z",
             "index_fingerprint": "idx-alpha",
             "store_target": {
-                "name": "rework-local-pg",
-                "database": "llm_context_rework",
+                "name": "llm-context-local-pg",
+                "database": "llm_context",
             },
         },
     )
@@ -1389,5 +1389,14 @@ def test_database_unreachable_localhost_suggests_local_or_docker_runbook(
         "Docker con port mapping" in item
         for item in payload["runtime_readiness"]["recommended_actions"]
     )
+
+
+
+
+
+
+
+
+
 
 
