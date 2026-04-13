@@ -19,8 +19,74 @@ projects:
       - "mcp_server.err.log"
     ingest_enabled: true
     write_enabled: false
-
-
-
-
-
+  - project_id: bpopilot
+    display_name: BpoPilot
+    root_path: C:/inetpub/wwwroot/Bpopilot
+    include_profile: default
+    retrieval_profile: default
+    include_dirs:
+      - api
+      - App_Code
+      - librerie/BpoFH
+      - librerie/Fiscobot
+      - librerie/GestioneXML
+      - librerie/primanota
+      - pubblico/api
+      - pubblico/bpofh
+      - pubblico/js
+      - pubblico/css
+      - pubblico/InternalOrm
+      - pubblico/LocalizationToolkit
+      - pubblico/DataExport
+      - pubblico/json
+      - pubblico/*.aspx
+      - pubblico/*.ashx
+      - pubblico/*.html
+      - pubblico/Global.asax
+      - pubblico/Global.asax.cs
+      - docs
+      - "*.md"
+    exclude_globs:
+      - "*.env*"
+      - ".git/**"
+      - ".vs/**"
+      - ".vscode/**"
+      - ".claude/**"
+      - ".codex/**"
+      - ".superpowers/**"
+      - ".worktrees/**"
+      - "api/bin/**"
+      - "api/obj/**"
+      - "api/packages/**"
+      - "api/UnitTestProject1/**"
+      - "pubblico/App_Data/**"
+      - "pubblico/assets/**"
+      - "pubblico/bin/**"
+      - "pubblico/Certificati/**"
+      - "pubblico/Connected Services/**"
+      - "pubblico/doc/**"
+      - "pubblico/emailtesti/**"
+      - "pubblico/immagini/**"
+      - "pubblico/logo/**"
+      - "pubblico/modali/**"
+      - "pubblico/r/**"
+      - "pubblico/scriptDb/**"
+      - "pubblico/TestFatture/**"
+      - "pubblico/TestHttpRequest/**"
+      - "pubblico/TestLocalizationToolkit/**"
+      - "pubblico/testnotifiche/**"
+      - "pubblico/TestReloaded/**"
+      - "pubblico/tmpls/**"
+      - "pubblico/UnitTest2/**"
+      - "pubblico/video/**"
+      - "node_modules/**"
+      - "packages/**"
+      - "bin/**"
+      - "TestResults/**"
+      - "upload/**"
+      - "allegati/**"
+      - "Log/**"
+      - "esportazioni/**"
+      - "xmlfiles/**"
+    ingest_enabled: true
+    write_enabled: false
