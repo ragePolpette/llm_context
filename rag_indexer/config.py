@@ -64,6 +64,7 @@ class AppConfig:
     keyword_weight: float = 0.5
     max_chunks_per_doc: int = 5
     min_score: float = 0.20
+    min_score_floor: float = 0.15
     header_penalty: float = 0.05
     rerank_enabled: bool = False
     default_doc_type: str = "code"
