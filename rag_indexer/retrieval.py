@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
-from .embedder import Embedder
+from .embedder import Embedder, normalize_embedding_model_id
 from .store import RagStore
 
 
@@ -165,5 +165,5 @@ def _make_snippet(
 def _embedder_id(embedder: Embedder) -> str:
     model_name = getattr(embedder, "model_name", None)
     if model_name:
-        return str(model_name)
+        return normalize_embedding_model_id(model_name)
     return embedder.__class__.__name__.lower()

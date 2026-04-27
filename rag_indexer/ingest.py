@@ -12,7 +12,7 @@ import uuid
 from typing import Any, Optional
 
 from .chunking import Chunk, chunk_code, chunk_markdown, chunk_text
-from .embedder import Embedder
+from .embedder import Embedder, normalize_embedding_model_id
 from .scanner import get_source_type, read_text, scan_files
 from .store import ChunkRecord, DocumentRecord, EmbeddingRecord, RagStore, SymbolRecord
 
@@ -323,7 +323,7 @@ def _embed_chunks(
 def _embedder_id(embedder: Embedder) -> str:
     model_name = getattr(embedder, "model_name", None)
     if model_name:
-        return str(model_name)
+        return normalize_embedding_model_id(model_name)
     return embedder.__class__.__name__.lower()
 
 
