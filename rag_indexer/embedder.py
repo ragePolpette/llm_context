@@ -44,7 +44,8 @@ class LocalHashEmbedder(Embedder):
 
 class LocalSentenceTransformerEmbedder(Embedder):
     def __init__(self, model_name: str, device: Optional[str] = None) -> None:
-        self.model_name = model_name
+        self.model_source = model_name
+        self.model_name = normalize_embedding_model_id(model_name)
         self.device = device
         try:
             st_module = importlib.import_module("sentence_transformers")
@@ -56,9 +57,9 @@ class LocalSentenceTransformerEmbedder(Embedder):
         if model_class is None:
             raise RuntimeError("SentenceTransformer not available")
         if self.device:
-            self.model = model_class(self.model_name, device=self.device)
+            self.model = model_class(self.model_source, device=self.device)
         else:
-            self.model = model_class(self.model_name)
+            self.model = model_class(self.model_source)
         self.batch_size = _get_env_int("ST_BATCH_SIZE", None, 32)
         self.normalize = _get_env_bool("ST_NORMALIZE", None, True)
 
@@ -93,6 +94,18 @@ class GeminiEmbedder(Embedder):
     def embed_many(self, texts: list[str]) -> list[list[float]]:
         # Metodo non disponibile quando Gemini è disabilitato.
         raise RuntimeError("Gemini disabilitato in questa installazione")
+
+
+def normalize_embedding_model_id(model_name: Any) -> str:
+    """Return the stable model id used as DB key for embedding rows."""
+    raw = str(model_name or "").strip()
+    if not raw:
+        return raw
+    normalized_path = raw.replace("\\", "/")
+    match = re.search(r"(?:^|/)models--([^/]+?)(?:/snapshots/|$)", normalized_path)
+    if match:
+        return match.group(1).replace("--", "/")
+    return raw
 
 
 def _extract_embeddings_values(response: Any) -> list[list[float]]:

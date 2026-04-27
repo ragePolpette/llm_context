@@ -337,28 +337,8 @@ class MCPHandler:
             },
         )
 
-        context, results = build_context(
-            dsn=self._default_dsn,
-            embedder=embedder,
-            embedding_dim=embedding_dim,
-            project_id=project_id,
-            query_text=query_text,
-            query_embedding=query_embedding,
-            top_k=top_k,
-            path_prefix=resolved_prefix,
-            max_chars=max_chars,
-            doc_type=doc_type,
-            language=language,
-            vector_weight=self._config.vector_weight,
-            keyword_weight=self._config.keyword_weight,
-            max_chunks_per_doc=self._config.max_chunks_per_doc,
-            min_score=self._config.min_score,
-            header_penalty=self._config.header_penalty,
-        )
-        auto_scope_fallback_used = False
-        initial_resolved_prefix = resolved_prefix
-        if not results and resolved_prefix and auto_scope and not explicit_scope:
-            context, results = build_context(
+        def run_context_search(*, path_prefix: Optional[str], min_score: float):
+            return build_context(
                 dsn=self._default_dsn,
                 embedder=embedder,
                 embedding_dim=embedding_dim,
@@ -366,18 +346,41 @@ class MCPHandler:
                 query_text=query_text,
                 query_embedding=query_embedding,
                 top_k=top_k,
-                path_prefix=None,
+                path_prefix=path_prefix,
                 max_chars=max_chars,
                 doc_type=doc_type,
                 language=language,
                 vector_weight=self._config.vector_weight,
                 keyword_weight=self._config.keyword_weight,
                 max_chunks_per_doc=self._config.max_chunks_per_doc,
-                min_score=self._config.min_score,
+                min_score=min_score,
                 header_penalty=self._config.header_penalty,
+            )
+
+        effective_min_score = self._config.min_score
+        context, results = run_context_search(
+            path_prefix=resolved_prefix,
+            min_score=effective_min_score,
+        )
+        auto_scope_fallback_used = False
+        relaxed_min_score_fallback_used = False
+        initial_resolved_prefix = resolved_prefix
+        if not results and resolved_prefix and auto_scope and not explicit_scope:
+            context, results = run_context_search(
+                path_prefix=None,
+                min_score=effective_min_score,
             )
             resolved_prefix = None
             auto_scope_fallback_used = True
+        min_score_floor = min(self._config.min_score, self._config.min_score_floor)
+        if not results and effective_min_score > min_score_floor:
+            context, results = run_context_search(
+                path_prefix=resolved_prefix,
+                min_score=min_score_floor,
+            )
+            if results:
+                relaxed_min_score_fallback_used = True
+                effective_min_score = min_score_floor
         context_sheet = format_context_sheet(
             query_text=query_text,
             path_prefix=resolved_prefix,
@@ -414,7 +417,9 @@ class MCPHandler:
                 "top_k": top_k,
                 "path_prefix": resolved_prefix,
                 "max_chars": max_chars,
+                "min_score": effective_min_score,
                 "auto_scope_fallback_used": auto_scope_fallback_used,
+                "relaxed_min_score_fallback_used": relaxed_min_score_fallback_used,
                 "initial_path_prefix": initial_resolved_prefix,
             },
         }
@@ -511,6 +516,32 @@ class MCPHandler:
                     "reason": "entra dopo rag_context quando servono linee o signature esatte",
                 },
             ],
+            "search_levels": [
+                {
+                    "level": "wide",
+                    "tool": "rag_search",
+                    "goal": "esplorazione larga quando non conosci file o simboli",
+                    "query_shape": "2-4 termini dominio, senza parole troppo generiche o miste",
+                    "example": "interscambio sdi fatture",
+                    "next_step": "scegli un file o un simbolo dai result_groups",
+                },
+                {
+                    "level": "symbolic",
+                    "tool": "symbol_search",
+                    "goal": "precisione su classi, metodi, interfacce, endpoint o modelli",
+                    "query_shape": "nome simbolo o prefisso tecnico",
+                    "example": "Interscambio",
+                    "next_step": "usa source_path e line_start per aprire il codice esatto",
+                },
+                {
+                    "level": "specific",
+                    "tool": "rag_context",
+                    "goal": "contesto operativo su file/scope dopo aver individuato l'area",
+                    "query_shape": "domanda tecnica con path_prefix o file esplicito",
+                    "example": "query_text='flusso stato SDI' path_prefix='pubblico\\\\api\\\\Controllers\\\\Interscambio.cs'",
+                    "next_step": "lavora sui core_files e verifica con symbol_search",
+                },
+            ],
             "tool_roles": {
                 "rag_context": {
                     "role": "default working tool",
@@ -561,6 +592,11 @@ class MCPHandler:
             },
             "decision_guide": [
                 {
+                    "if": "hai una query multi-termine mista tipo 'endpoint WCF fatture interscambio SDI'",
+                    "use": ["rag_search wide", "symbol_search symbolic", "rag_context specific"],
+                    "because": "prima allarga sui termini dominio, poi fissa simbolo/file, infine chiedi il contesto sullo scope corretto",
+                },
+                {
                     "if": "stai partendo da una query tecnica e vuoi il contesto giusto per lavorare",
                     "use": ["rag_context"],
                     "because": "e' il tool principale e restituisce package funzionale, entry point e file core",
@@ -609,6 +645,14 @@ class MCPHandler:
                 ),
             },
             "recommended_workflows": [
+                {
+                    "goal": "cercare in tre livelli",
+                    "steps": [
+                        "wide: rag_search con termini dominio",
+                        "symbolic: symbol_search sui nomi emersi",
+                        "specific: rag_context con path_prefix/file",
+                    ],
+                },
                 {
                     "goal": "iniziare a lavorare su una query tecnica",
                     "steps": ["context_info", "rag_context", "symbol_search (se servono linee/signature esatte)"],
@@ -1820,6 +1864,25 @@ def format_context_info_text(payload: dict[str, Any]) -> str:
             tool = item.get("tool") or "tool"
             reason = item.get("reason") or ""
             lines.append(f"- {step}: {tool} {reason}".rstrip())
+        lines.append("")
+
+    search_levels = payload.get("search_levels") or []
+    if search_levels:
+        lines.append("SEARCH LEVELS")
+        for item in search_levels:
+            level = item.get("level") or "level"
+            tool = item.get("tool") or "tool"
+            goal = item.get("goal") or ""
+            query_shape = item.get("query_shape") or ""
+            example = item.get("example") or ""
+            next_step = item.get("next_step") or ""
+            lines.append(f"- {level}: {tool} - {goal}".rstrip())
+            if query_shape:
+                lines.append(f"  query: {query_shape}")
+            if example:
+                lines.append(f"  example: {example}")
+            if next_step:
+                lines.append(f"  next: {next_step}")
         lines.append("")
 
     decision_guide = payload.get("decision_guide") or []

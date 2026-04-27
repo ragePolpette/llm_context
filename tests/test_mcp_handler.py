@@ -109,7 +109,7 @@ def test_rag_context_retries_without_auto_scope_when_derived_prefix_has_no_hits(
     assert payload["meta"]["path_prefix"] is None
 
 
-def test_rag_context_does_not_retry_when_path_prefix_is_explicit(monkeypatch, no_warmup, tmp_path):
+def test_rag_context_explicit_scope_skips_autoscope_retry_but_relaxes_min_score(monkeypatch, no_warmup, tmp_path):
     calls = []
 
     def fake_build_context(**kwargs):
@@ -126,8 +126,36 @@ def test_rag_context_does_not_retry_when_path_prefix_is_explicit(monkeypatch, no
         {"query_text": "GenerateInvoice", "project_id": "alpha", "path_prefix": "src/api/controllers/BillingController.cs"}
     )
 
-    assert calls == ["src\\api\\controllers\\BillingController.cs"]
+    assert calls == [
+        "src\\api\\controllers\\BillingController.cs",
+        "src\\api\\controllers\\BillingController.cs",
+    ]
     assert payload["meta"]["auto_scope_fallback_used"] is False
+
+
+def test_rag_context_relaxes_min_score_when_standard_search_has_no_hits(monkeypatch, no_warmup, tmp_path):
+    calls = []
+
+    def fake_build_context(**kwargs):
+        calls.append(kwargs["min_score"])
+        if kwargs["min_score"] == 0.15:
+            return "ctx", [{"source_path": "src/api/RestServiceBase.cs", "score": 0.19, "text": "endpoint"}]
+        return "ctx-empty", []
+
+    monkeypatch.setattr(mcp_handler_module, "build_context", fake_build_context)
+    monkeypatch.setattr(mcp_handler_module, "format_context_sheet", lambda **kwargs: "sheet")
+    handler = MCPHandler(config_path=str(_write_multi_project_config(tmp_path)))
+    monkeypatch.setattr(handler, "_get_embedder", lambda args, embedding_dim: object())
+    monkeypatch.setattr(handler, "_collect_context_symbols", lambda **kwargs: [])
+
+    payload = handler._run_rag_context(
+        {"query_text": "endpoint WCF fatture interscambio SDI", "project_id": "alpha"}
+    )
+
+    assert calls == [0.2, 0.15]
+    assert payload["results"]
+    assert payload["meta"]["relaxed_min_score_fallback_used"] is True
+    assert payload["meta"]["min_score"] == 0.15
 
 
 def test_rag_context_builds_symbol_follow_up_from_core_file_roles(monkeypatch, no_warmup, tmp_path):
@@ -358,13 +386,15 @@ def test_context_info_exposes_tool_map_and_usage_notes(no_warmup, tmp_path):
     assert "tool_map" in payload
     assert "tool_roles" in payload
     assert "quick_start" in payload
+    assert "search_levels" in payload
     assert "decision_guide" in payload
     assert "anti_patterns" in payload
     assert "recommended_workflows" in payload
     assert "rag_context" in payload["tool_map"]["working_context"]
     assert payload["tool_roles"]["symbol_search"]["role"] == "precision lookup"
     assert payload["quick_start"][0]["tool"] == "context_info"
-    assert payload["decision_guide"][0]["use"] == ["rag_context"]
+    assert payload["search_levels"][0]["level"] == "wide"
+    assert any(item["use"] == ["rag_context"] for item in payload["decision_guide"])
     assert payload["tool_roles"]["rag_search"]["returns"] == [
         "results",
         "summary",
@@ -434,6 +464,16 @@ def test_format_tool_text_formats_context_info_as_decision_guide():
             "quick_start": [
                 {"step": "1", "tool": "context_info", "reason": "scegli il flusso corretto"}
             ],
+            "search_levels": [
+                {
+                    "level": "wide",
+                    "tool": "rag_search",
+                    "goal": "esplorazione larga",
+                    "query_shape": "termini dominio",
+                    "example": "interscambio sdi fatture",
+                    "next_step": "scegli file",
+                }
+            ],
             "decision_guide": [
                 {
                     "if": "devi il package principale",
@@ -455,6 +495,8 @@ def test_format_tool_text_formats_context_info_as_decision_guide():
     assert "status: blocked ready_for_queries=false" in text
     assert "blocker: no_project_with_integrity_ok" in text
     assert "QUICK START" in text
+    assert "SEARCH LEVELS" in text
+    assert "wide: rag_search - esplorazione larga" in text
     assert "DECISION GUIDE" in text
     assert "ANTI-PATTERNS" in text
     assert "if devi il package principale -> use rag_context" in text
