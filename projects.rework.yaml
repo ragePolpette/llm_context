@@ -12,7 +12,6 @@ projects:
       - mcp_server.py
       - mcp_server_http.py
       - README.md
-      - AGENT_GUIDE.md
     exclude_globs:
       - "*.env*"
       - ".local/**"
