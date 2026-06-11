@@ -287,8 +287,58 @@ def init_db_v2(conn: Any, embedding_dim: int, ivfflat_lists: int) -> None:
             CREATE INDEX IF NOT EXISTS symbols_repo_kind_idx ON symbols (repo_id, kind);
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS symbol_refs (
+                ref_id       UUID PRIMARY KEY,
+                repo_id      TEXT NOT NULL,
+                caller_doc_id UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+                callee_name  TEXT NOT NULL,
+                line         INT NOT NULL,
+                language     TEXT
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS symbol_refs_repo_callee_idx ON symbol_refs (repo_id, lower(callee_name));
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS symbol_refs_caller_doc_idx ON symbol_refs (caller_doc_id);
+            """
+        )
     conn.commit()
     _register_vector_safe(conn)
+
+
+def ensure_symbol_refs_table(conn: Any) -> None:
+    """Idempotent migration: add symbol_refs table to an existing v2 schema."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS symbol_refs (
+                ref_id       UUID PRIMARY KEY,
+                repo_id      TEXT NOT NULL,
+                caller_doc_id UUID NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+                callee_name  TEXT NOT NULL,
+                line         INT NOT NULL,
+                language     TEXT
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS symbol_refs_repo_callee_idx ON symbol_refs (repo_id, lower(callee_name));
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS symbol_refs_caller_doc_idx ON symbol_refs (caller_doc_id);
+            """
+        )
+    conn.commit()
 
 
 def _register_vector_safe(conn: Any) -> None:

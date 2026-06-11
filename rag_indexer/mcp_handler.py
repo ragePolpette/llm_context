@@ -85,6 +85,10 @@ class MCPHandler:
             os.getenv("LLM_CONTEXT_MAX_QUERY_EMBEDDING_ITEMS", "4096")
         )
         self._embedder_cache: dict[str, Embedder] = {}
+        self._query_cache: dict[str, dict[str, Any]] = {}
+        self._query_cache_lock = threading.Lock()
+        self._query_cache_max = int(os.getenv("LLM_CONTEXT_CACHE_MAX", "500"))
+        self._query_cache_ttl = int(os.getenv("LLM_CONTEXT_CACHE_TTL_SECONDS", "1800"))
         self._db_probe_cache: Optional[dict[str, Any]] = None
         self._db_probe_cache_at = 0.0
         self._db_probe_lock = threading.Lock()
@@ -195,6 +199,7 @@ class MCPHandler:
                     "tools": [
                         tool_rag_context(),
                         tool_rag_search(),
+                        tool_rag_full_context(),
                         tool_map_work_item_to_codebase(),
                         tool_context_info(),
                         tool_symbol_search(),
@@ -235,6 +240,8 @@ class MCPHandler:
                     payload = self._run_rag_context(args)
                 elif name == "rag_search":
                     payload = self._run_rag_search(args)
+                elif name == "rag_full_context":
+                    payload = self._run_rag_full_context(args)
                 elif name == "map_work_item_to_codebase":
                     payload = self._run_map_work_item_to_codebase(args)
                 elif name == "context_info":
@@ -295,12 +302,56 @@ class MCPHandler:
         }
         sys.stderr.write(f"[MCP_ACTIVITY] {json.dumps(record, ensure_ascii=True, cls=UUIDEncoder)}\n")
 
+    def _make_cache_key(self, args: dict[str, Any]) -> Optional[str]:
+        """Build a deterministic cache key from query args. Returns None if not cacheable."""
+        query_text = args.get("query_text")
+        if not query_text:
+            return None
+        import hashlib as _hashlib
+        key_data = {
+            "project_id": str(args.get("project_id") or ""),
+            "query_text": str(query_text).strip().lower(),
+            "path_prefix": str(args.get("path_prefix") or "").strip().lower(),
+            "top_k": int(args.get("top_k", 8)),
+            "doc_type": str(args.get("doc_type") or ""),
+            "language": str(args.get("language") or ""),
+        }
+        raw = json.dumps(key_data, sort_keys=True)
+        return _hashlib.sha256(raw.encode()).hexdigest()
+
+    def _get_cached(self, cache_key: str) -> Optional[dict[str, Any]]:
+        with self._query_cache_lock:
+            entry = self._query_cache.get(cache_key)
+            if entry is None:
+                return None
+            if monotonic() - entry["ts"] > self._query_cache_ttl:
+                del self._query_cache[cache_key]
+                return None
+            return entry["payload"]
+
+    def _set_cache(self, cache_key: str, payload: dict[str, Any]) -> None:
+        with self._query_cache_lock:
+            if len(self._query_cache) >= self._query_cache_max:
+                oldest = min(self._query_cache, key=lambda k: self._query_cache[k]["ts"])
+                del self._query_cache[oldest]
+            self._query_cache[cache_key] = {"payload": payload, "ts": monotonic()}
+
     def _run_rag_context(self, args: dict[str, Any], *, tool_name: str = "rag_context") -> dict[str, Any]:
         """Execute rag_context tool."""
         query_text = args.get("query_text")
         query_embedding = args.get("query_embedding")
         if query_text is None and query_embedding is None:
             raise ValueError("query_text or query_embedding is required")
+
+        # Serve from cache when possible (only for text queries, not embedding queries)
+        if query_embedding is None and tool_name == "rag_context":
+            cache_key = self._make_cache_key(args)
+            if cache_key:
+                cached = self._get_cached(cache_key)
+                if cached is not None:
+                    self._log_activity("query_cache_hit", {"tool": tool_name, "project_id": args.get("project_id")})
+                    return cached
+
         project_id = self._resolve_project_id(args, tool_name=tool_name)
         top_k = int(args.get("top_k", 8))
         path_prefix = args.get("path_prefix")
@@ -406,22 +457,33 @@ class MCPHandler:
             results=results,
             symbol_results=symbol_results,
         )
+        meta: dict[str, Any] = {
+            "project_id": project_id,
+            "top_k": top_k,
+            "path_prefix": resolved_prefix,
+            "max_chars": max_chars,
+            "min_score": effective_min_score,
+            "auto_scope_fallback_used": auto_scope_fallback_used,
+            "relaxed_min_score_fallback_used": relaxed_min_score_fallback_used,
+            "initial_path_prefix": initial_resolved_prefix,
+        }
+        if not results:
+            meta["no_match_reason"] = {
+                "threshold_was": effective_min_score,
+                "all_fallbacks_attempted": auto_scope_fallback_used or relaxed_min_score_fallback_used,
+                "suggestion": (
+                    "Try a shorter or more specific query. "
+                    + ("Remove or broaden path_prefix. " if initial_resolved_prefix else "")
+                    + "Check that the project has been indexed (list_projects / get_project_info)."
+                ),
+            }
         payload = {
             "functional_context": functional_context,
             "context": context,
             "context_sheet": context_sheet,
             "results": results,
             "symbol_results": symbol_results,
-            "meta": {
-                "project_id": project_id,
-                "top_k": top_k,
-                "path_prefix": resolved_prefix,
-                "max_chars": max_chars,
-                "min_score": effective_min_score,
-                "auto_scope_fallback_used": auto_scope_fallback_used,
-                "relaxed_min_score_fallback_used": relaxed_min_score_fallback_used,
-                "initial_path_prefix": initial_resolved_prefix,
-            },
+            "meta": meta,
         }
         self._log_activity(
             "query_out",
@@ -433,6 +495,11 @@ class MCPHandler:
                 "has_results": bool(results),
             },
         )
+        # Cache successful results only
+        if results and query_embedding is None and tool_name == "rag_context":
+            cache_key = self._make_cache_key(args)
+            if cache_key:
+                self._set_cache(cache_key, payload)
         return payload
 
     def _run_rag_search(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -473,6 +540,90 @@ class MCPHandler:
                 "search_mode": "investigation",
             },
         }
+
+    def _run_rag_full_context(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Execute rag_full_context: rag_context + symbols + decision_points in one call."""
+        base = self._run_rag_context(args, tool_name="rag_full_context")
+        functional_context = base.get("functional_context") or {}
+        meta = base.get("meta") or {}
+        project_id = str(meta.get("project_id") or "")
+        embedding_dim = int(args.get("embedding_dim", self._default_embedding_dim))
+
+        include_symbols = parse_bool(str(args.get("include_symbols", True)))
+        explain = parse_bool(str(args.get("explain", False)))
+
+        # Symbols are already collected by rag_context; use them
+        symbol_results = base.get("symbol_results") or []
+        entry_points = functional_context.get("entry_points") or []
+        core_files = functional_context.get("core_files") or []
+
+        # Build decision_points from entry_points enriched with caller sites
+        decision_points: list[dict[str, Any]] = []
+        if project_id and entry_points:
+            for ep in entry_points[:6]:
+                name = str(ep.get("name") or "")
+                if not name:
+                    continue
+                callers: list[dict[str, Any]] = []
+                try:
+                    pool = get_pool(self._default_dsn)
+                    if pool is not None:
+                        with pool.connection() as conn:
+                            store = RagStore(conn, embedding_dim)
+                            if store.has_symbol_refs_table():
+                                callers = store.query_caller_sites(name, project_id, limit=10)
+                    else:
+                        conn = get_connection(self._default_dsn)
+                        try:
+                            store = RagStore(conn, embedding_dim)
+                            if store.has_symbol_refs_table():
+                                callers = store.query_caller_sites(name, project_id, limit=10)
+                        finally:
+                            conn.close()
+                except Exception:
+                    pass
+                dp: dict[str, Any] = {
+                    "symbol": name,
+                    "kind": ep.get("kind"),
+                    "path": ep.get("source_path"),
+                    "lines": [ep.get("line_start"), ep.get("line_end")],
+                    "signature": ep.get("signature"),
+                }
+                if callers:
+                    dp["callers"] = callers
+                    dp["impact_summary"] = f"Referenced in {len(callers)} location(s)"
+                if explain:
+                    matching_file = next(
+                        (cf for cf in core_files if cf.get("source_path") == ep.get("source_path")),
+                        None,
+                    )
+                    if matching_file:
+                        dp["selection_reason"] = matching_file.get("selection_reason", "")
+                        dp["functional_role"] = matching_file.get("functional_role", "")
+                decision_points.append(dp)
+
+        # Compute confidence as mean of max_score across core_files
+        scores = [float(cf.get("max_score", 0.0)) for cf in core_files if cf.get("max_score")]
+        confidence = round(sum(scores) / len(scores), 4) if scores else 0.0
+
+        # Check if a snapshot exists for this project
+        snapshot_path = self._project_root / ".local" / "snapshots" / project_id / "snapshot_index.json"
+
+        payload: dict[str, Any] = {
+            "context": base.get("context"),
+            "functional_context": functional_context,
+            "symbols": symbol_results if include_symbols else [],
+            "decision_points": decision_points,
+            "confidence": confidence,
+            "fallback_used": bool(
+                meta.get("auto_scope_fallback_used") or meta.get("relaxed_min_score_fallback_used")
+            ),
+            "snapshot_available": snapshot_path.exists(),
+            "meta": meta,
+        }
+        if not base.get("results"):
+            payload["no_match_reason"] = meta.get("no_match_reason")
+        return payload
 
     def _run_context_info(self) -> dict[str, Any]:
         """Describe scope and boundaries of llm-context MCP."""
@@ -1468,6 +1619,30 @@ def tool_rag_context() -> dict[str, Any]:
             },
         },
     }
+
+
+def tool_rag_full_context() -> dict[str, Any]:
+    """Return the rag_full_context tool schema."""
+    base = tool_rag_context()
+    base["name"] = "rag_full_context"
+    base["description"] = (
+        "Tool all-in-one del read-plane MCP: esegue rag_context e aggiunge automaticamente "
+        "simboli, decision_points (dove agire e impatto stimato) e caller sites per gli "
+        "entry point trovati. Ideale per task di modifica codice dove serve capire subito "
+        "'quali linee toccare e cosa si rompe'. Ritorna confidence, fallback_used, "
+        "snapshot_available. Richiede sempre project_id esplicito."
+    )
+    props = dict(base["inputSchema"]["properties"])
+    props["include_symbols"] = {
+        "type": "boolean",
+        "description": "Include symbol lookup for core files (default: true)",
+    }
+    props["explain"] = {
+        "type": "boolean",
+        "description": "Include selection_reason and functional_role in decision_points (default: false)",
+    }
+    base["inputSchema"] = {"type": "object", "properties": props}
+    return base
 
 
 def tool_rag_search() -> dict[str, Any]:

@@ -14,7 +14,7 @@ from typing import Any, Optional
 from .chunking import Chunk, chunk_code, chunk_markdown, chunk_text
 from .embedder import Embedder, normalize_embedding_model_id
 from .scanner import get_source_type, read_text, scan_files
-from .store import ChunkRecord, DocumentRecord, EmbeddingRecord, RagStore, SymbolRecord
+from .store import ChunkRecord, DocumentRecord, EmbeddingRecord, RagStore, SymbolRecord, SymbolRefRecord
 
 
 @dataclass
@@ -126,7 +126,7 @@ def ingest_project_v2(
 
         if symbol_search_enabled and source_type == "code":
             try:
-                from .symbol_extractor import extract_symbols
+                from .symbol_extractor import extract_symbols, extract_call_sites
                 symbol_infos = extract_symbols(text, language or "")
                 store.delete_symbols(doc_id)
                 symbol_records = [
@@ -146,6 +146,22 @@ def ingest_project_v2(
                 if symbol_records:
                     store.insert_symbols(symbol_records)
                 symbol_count = len(symbol_records)
+
+                if store.has_symbol_refs_table():
+                    call_sites = extract_call_sites(text, language or "")
+                    store.delete_symbol_refs(doc_id)
+                    ref_records = [
+                        SymbolRefRecord(
+                            caller_doc_id=doc_id,
+                            repo_id=repo_id,
+                            callee_name=cs.callee_name,
+                            line=cs.line,
+                            language=language,
+                        )
+                        for cs in call_sites
+                    ]
+                    if ref_records:
+                        store.insert_symbol_refs(ref_records)
             except Exception as _sym_exc:
                 logger.warning("Symbol extraction failed for %s: %s", path, _sym_exc)
 
