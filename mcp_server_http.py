@@ -479,7 +479,16 @@ def _jsonrpc_transport_error(message: str) -> dict[str, Any]:
 
 
 def _build_health_payload(handler: MCPHandler) -> dict[str, Any]:
-    return handler.get_operational_status(ready=handler._ready.is_set())
+    payload = handler.get_operational_status(ready=handler._ready.is_set())
+    # Enrich with cache stats
+    with handler._query_cache_lock:
+        cache_entries = len(handler._query_cache)
+    payload["query_cache"] = {
+        "entries": cache_entries,
+        "max_entries": handler._query_cache_max,
+        "ttl_seconds": handler._query_cache_ttl,
+    }
+    return payload
 
 
 def _resolve_runtime_config_path() -> Optional[str]:

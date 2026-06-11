@@ -6,9 +6,13 @@ Fallback: regex-based extraction (same regexes used in ingest.py header building
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Optional
+
+log = logging.getLogger(__name__)
+_treesitter_warned: set[str] = set()
 
 
 @dataclass
@@ -371,6 +375,77 @@ def extract_symbols(text: str, language: str) -> list[SymbolInfo]:
     try:
         return _extract_symbols_treesitter(text, lang)
     except ImportError:
+        if lang not in _treesitter_warned:
+            _treesitter_warned.add(lang)
+            log.warning(
+                "tree-sitter grammar not available for language=%r — "
+                "falling back to regex extraction (less precise). "
+                "Install tree-sitter-%s to enable AST-based extraction.",
+                language,
+                lang.replace("csharp", "c-sharp"),
+            )
         return _extract_symbols_regex(text, language)
     except Exception:
         return _extract_symbols_regex(text, language)
+
+
+# ---------------------------------------------------------------------------
+# Call site extraction
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CallSiteInfo:
+    callee_name: str
+    line: int  # 1-based
+
+
+_CALL_SITE_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]{3,})\s*\(")
+
+_SKIP_PY = frozenset({
+    "print", "isinstance", "hasattr", "getattr", "setattr", "delattr",
+    "range", "enumerate", "sorted", "reversed", "filter", "super",
+    "property", "staticmethod", "classmethod", "abstractmethod",
+})
+_SKIP_CS = frozenset({
+    "foreach", "while", "switch", "return", "nameof", "typeof", "sizeof",
+    "checked", "unchecked", "default",
+})
+_SKIP_JS = frozenset({
+    "function", "return", "typeof", "instanceof", "require", "console",
+})
+_SKIP_GENERIC = frozenset({
+    "if", "for", "while", "class", "catch", "switch", "with",
+})
+
+
+def extract_call_sites(text: str, language: str) -> list[CallSiteInfo]:
+    """
+    Extract function/method call sites from source code (regex-based).
+
+    Returns identifiers used as callees (name followed by '('), one entry
+    per call site per line. Used to populate the symbol_refs table so agents
+    can answer 'where is symbol X referenced?'.
+    """
+    lang = (language or "").strip().lower()
+    if lang == "python":
+        skip = _SKIP_PY | _SKIP_GENERIC
+    elif lang in {"csharp", "aspnet"}:
+        skip = _SKIP_CS | _SKIP_GENERIC
+    elif lang in {"javascript", "typescript"}:
+        skip = _SKIP_JS | _SKIP_GENERIC
+    else:
+        skip = _SKIP_GENERIC
+
+    results: list[CallSiteInfo] = []
+    seen: set[tuple[str, int]] = set()
+    for line_idx, line_text in enumerate(text.splitlines(), start=1):
+        for m in _CALL_SITE_RE.finditer(line_text):
+            name = m.group(1)
+            if name.lower() in skip:
+                continue
+            key = (name, line_idx)
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(CallSiteInfo(callee_name=name, line=line_idx))
+    return results

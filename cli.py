@@ -100,6 +100,18 @@ def main() -> None:
     query_parser.add_argument("--doc-type", default=None)
     query_parser.add_argument("--language", default=None)
 
+    snapshot_parser = subparsers.add_parser("export-snapshot", help="Export pre-computed context snapshot")
+    snapshot_parser.add_argument("--dsn", required=True)
+    snapshot_parser.add_argument("--project-id", required=True)
+    snapshot_parser.add_argument("--output", required=True, help="Output directory for snapshot files")
+    snapshot_parser.add_argument("--embedder", default="local-st")
+    snapshot_parser.add_argument("--embedding-dim", type=int, default=None)
+    snapshot_parser.add_argument(
+        "--local-model",
+        default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    )
+    snapshot_parser.add_argument("--top-files", type=int, default=20)
+
     context_parser = subparsers.add_parser("context", help="Get context for agents")
     context_parser.add_argument("--dsn", required=True)
     context_parser.add_argument("--project-id", required=True)
@@ -156,6 +168,35 @@ def main() -> None:
             f"chunks_inserted={stats.chunks_inserted} "
             f"duration_sec={stats.duration_sec:.2f}"
         )
+        return
+
+    if args.command == "export-snapshot":
+        from rag_indexer.snapshot_exporter import export_snapshot
+        embedding_dim = args.embedding_dim or config.embedding_dim
+        embedder = _build_embedder(
+            args.embedder,
+            embedding_dim,
+            local_model=args.local_model,
+        )
+        project = registry.require_project(args.project_id)
+        output_dir = Path(args.output) / args.project_id
+        result = export_snapshot(
+            dsn=args.dsn,
+            embedder=embedder,
+            embedding_dim=embedding_dim,
+            project_id=args.project_id,
+            project_record=project,
+            output_dir=output_dir,
+            config=config,
+            top_files_limit=args.top_files,
+        )
+        print(
+            f"Snapshot exported: {len(result.files_written)} file(s) written to {output_dir}\n"
+            f"  areas={result.area_count} top_files={result.top_file_count} "
+            f"symbols={result.symbol_count}"
+        )
+        for f in result.files_written:
+            print(f"  {f}")
         return
 
     if args.command == "query":

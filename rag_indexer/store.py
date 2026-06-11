@@ -60,6 +60,16 @@ class ChunkRecord:
 
 
 @dataclass
+class SymbolRefRecord:
+    caller_doc_id: uuid.UUID
+    repo_id: str
+    callee_name: str
+    line: int
+    language: Optional[str] = None
+    ref_id: uuid.UUID = field(default_factory=uuid.uuid4)
+
+
+@dataclass
 class EmbeddingRecord:
     chunk_id: uuid.UUID
     model_id: str
@@ -523,6 +533,66 @@ class RagStore:
             }
             for row in rows
         ]
+
+
+    def delete_symbol_refs(self, doc_id: uuid.UUID) -> int:
+        sql_text = "DELETE FROM symbol_refs WHERE caller_doc_id = @Valore0"
+        with self.conn.cursor() as cur:
+            execute_params(cur, sql_text, [doc_id])
+            deleted = cur.rowcount or 0
+        self.conn.commit()
+        return deleted
+
+    def insert_symbol_refs(self, records: list[SymbolRefRecord]) -> int:
+        if not records:
+            return 0
+        sql_text = (
+            "INSERT INTO symbol_refs ("
+            "ref_id, repo_id, caller_doc_id, callee_name, line, language"
+            ") VALUES ("
+            "@Valore0, @Valore1, @Valore2, @Valore3, @Valore4, @Valore5"
+            ") ON CONFLICT DO NOTHING"
+        )
+        rows = [
+            [r.ref_id, r.repo_id, r.caller_doc_id, r.callee_name, r.line, r.language]
+            for r in records
+        ]
+        with self.conn.cursor() as cur:
+            execute_many_params(cur, sql_text, rows)
+        self.conn.commit()
+        return len(records)
+
+    def query_caller_sites(
+        self,
+        callee_name: str,
+        repo_id: str,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return locations (path, line) that call callee_name in repo_id."""
+        sql_text = (
+            "SELECT d.path, sr.line "
+            "FROM symbol_refs sr "
+            "JOIN documents d ON d.doc_id = sr.caller_doc_id "
+            "WHERE sr.repo_id = @Valore0 "
+            "AND lower(sr.callee_name) = lower(@Valore1) "
+            "AND d.deleted_at IS NULL "
+            "ORDER BY d.path, sr.line "
+            "LIMIT @Valore2"
+        )
+        with self.conn.cursor() as cur:
+            execute_params(cur, sql_text, [repo_id, callee_name, limit])
+            rows = cur.fetchall()
+        return [{"path": row[0], "line": row[1]} for row in rows]
+
+    def has_symbol_refs_table(self) -> bool:
+        """Check whether the symbol_refs table exists (for migration guard)."""
+        sql_text = (
+            "SELECT to_regclass('public.symbol_refs') IS NOT NULL"
+        )
+        with self.conn.cursor() as cur:
+            cur.execute(sql_text)
+            row = cur.fetchone()
+        return bool(row and row[0])
 
 
 def _validate_embedding(embedding: list[float], dim: int) -> None:
