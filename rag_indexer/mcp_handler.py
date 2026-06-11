@@ -205,6 +205,7 @@ class MCPHandler:
                         tool_symbol_search(),
                         tool_list_projects(),
                         tool_get_project_info(),
+                        tool_get_project_snapshot(),
                     ]
                 },
             }
@@ -252,6 +253,8 @@ class MCPHandler:
                     payload = self._run_list_projects()
                 elif name == "get_project_info":
                     payload = self._run_get_project_info(args)
+                elif name == "get_project_snapshot":
+                    payload = self._run_get_project_snapshot(args)
                 else:
                     raise ValueError(f"Unknown tool: {name}")
             except Exception as exc:
@@ -943,6 +946,85 @@ class MCPHandler:
             raise ValueError("'project_id' is required for get_project_info")
         project = self._project_registry.require_project(project_id)
         return self._build_project_public_payload(project)
+
+    def _run_get_project_snapshot(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Return the pre-computed snapshot (CONTEXT.md + index) for a project."""
+        project_id = str(args.get("project_id") or "").strip()
+        if not project_id:
+            raise ValueError("'project_id' is required for get_project_snapshot")
+        self._validate_known_project(project_id)
+
+        snapshot_dir = self._project_root / ".local" / "snapshots" / project_id
+        index_path = snapshot_dir / "snapshot_index.json"
+        context_md_path = snapshot_dir / "CONTEXT.md"
+
+        if not snapshot_dir.exists() or not index_path.exists():
+            return {
+                "available": False,
+                "project_id": project_id,
+                "snapshot_dir": str(snapshot_dir),
+                "message": (
+                    f"No snapshot found for project '{project_id}'. "
+                    "Generate one with: "
+                    f"python cli.py export-snapshot --project-id {project_id} "
+                    f"--dsn $LLM_CONTEXT_DSN --output .local/snapshots"
+                ),
+            }
+
+        import json as _json
+        try:
+            snapshot_index = _json.loads(index_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            snapshot_index = {"error": str(exc)}
+
+        context_md: Optional[str] = None
+        part = str(args.get("part") or "all").strip().lower()
+        if part in {"all", "context_md"} and context_md_path.exists():
+            context_md = context_md_path.read_text(encoding="utf-8")
+
+        symbols_catalog: Optional[list] = None
+        functional_areas: Optional[list] = None
+        top_files: Optional[list] = None
+
+        if part == "all" or part == "symbols":
+            sym_path = snapshot_dir / "symbols_catalog.json"
+            if sym_path.exists():
+                try:
+                    symbols_catalog = _json.loads(sym_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+
+        if part == "all" or part == "areas":
+            areas_path = snapshot_dir / "functional_areas.json"
+            if areas_path.exists():
+                try:
+                    functional_areas = _json.loads(areas_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+
+        if part == "all" or part == "top_files":
+            top_path = snapshot_dir / "top_files.json"
+            if top_path.exists():
+                try:
+                    top_files = _json.loads(top_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+
+        payload: dict[str, Any] = {
+            "available": True,
+            "project_id": project_id,
+            "snapshot_dir": str(snapshot_dir),
+            "snapshot_index": snapshot_index,
+        }
+        if context_md is not None:
+            payload["context_md"] = context_md
+        if symbols_catalog is not None:
+            payload["symbols_catalog"] = symbols_catalog
+        if functional_areas is not None:
+            payload["functional_areas"] = functional_areas
+        if top_files is not None:
+            payload["top_files"] = top_files
+        return payload
 
     def get_operational_status(self, *, ready: bool) -> dict[str, Any]:
         projects = [
@@ -1768,9 +1850,54 @@ def tool_symbol_search() -> dict[str, Any]:
     }
 
 
+def tool_get_project_snapshot() -> dict[str, Any]:
+    return {
+        "name": "get_project_snapshot",
+        "description": (
+            "Carica lo snapshot pre-compilato di un progetto: CONTEXT.md (mappa orientativa "
+            "dell'intera codebase), indice simboli e aree funzionali. "
+            "Usarlo come prima call di sessione per orientarsi senza consumare query live. "
+            "Lo snapshot va generato offline con: "
+            "python cli.py export-snapshot --project-id <id> --dsn $DSN --output .local/snapshots"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["project_id"],
+            "properties": {
+                "project_id": {
+                    "type": "string",
+                    "description": "ID del progetto registrato",
+                },
+                "part": {
+                    "type": "string",
+                    "description": (
+                        "Parte da caricare: 'all' (default), 'context_md', "
+                        "'symbols', 'areas', 'top_files'"
+                    ),
+                },
+            },
+        },
+    }
+
+
 def format_tool_text(name: str, args: dict[str, Any], payload: dict[str, Any]) -> str:
     """Format tool output based on format hint."""
     format_hint = str(args.get("format", "") or "").strip().lower()
+    if name == "get_project_snapshot":
+        if not payload.get("available"):
+            return str(payload.get("message", "Snapshot not available."))
+        # Return context_md as primary text if present, else JSON
+        context_md = payload.get("context_md")
+        if context_md and format_hint not in {"json", "full"}:
+            meta = payload.get("snapshot_index") or {}
+            header = (
+                f"[Snapshot: {payload.get('project_id')} — "
+                f"generated {meta.get('generated_at', 'unknown')} — "
+                f"{meta.get('indexed_documents', '?')} docs · "
+                f"{meta.get('indexed_symbols', '?')} symbols]\n\n"
+            )
+            return header + context_md
+        return json.dumps(payload, indent=2, ensure_ascii=True, cls=UUIDEncoder)
     if name == "rag_context":
         if format_hint in {"json", "full"}:
             return json.dumps(payload, indent=2, ensure_ascii=True, cls=UUIDEncoder)
