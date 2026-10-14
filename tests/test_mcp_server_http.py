@@ -1,3 +1,4 @@
+import threading
 import types
 from logging.handlers import RotatingFileHandler
 
@@ -205,13 +206,19 @@ def test_build_health_payload_uses_handler_operational_status():
     class FakeHandler:
         def __init__(self):
             self._ready = FakeReady()
+            self._query_cache_lock = threading.Lock()
+            self._query_cache = {}
+            self._query_cache_max = 8
+            self._query_cache_ttl = 60
 
         def get_operational_status(self, *, ready):
             return {"status": "ready" if ready else "loading", "project_count": 2}
 
     payload = mcp_server_http._build_health_payload(FakeHandler())
 
-    assert payload == {"status": "ready", "project_count": 2}
+    assert payload["status"] == "ready"
+    assert payload["project_count"] == 2
+    assert payload["query_cache"] == {"entries": 0, "max_entries": 8, "ttl_seconds": 60}
 
 
 def test_resolve_runtime_config_path_reads_env(monkeypatch):

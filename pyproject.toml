@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "llm-memory-indexer"
 version = "0.1.0"
@@ -18,3 +22,10 @@ symbols = [
   "tree-sitter-javascript>=0.23",
   "tree-sitter-typescript>=0.23",
 ]
+dev = [
+  "pytest>=7",
+  "pytest-asyncio>=0.23",
+]
+
+[tool.setuptools]
+packages = ["rag_indexer"]
