@@ -20,6 +20,7 @@ from time import monotonic
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
+from rag_indexer import __version__
 from rag_indexer.agent_context import build_context
 from rag_indexer.config import load_config
 from rag_indexer.context_assembler import assemble_functional_context
@@ -59,6 +60,8 @@ class MCPHandler:
             self._config.projects_registry_path,
             self._config.projects_state_path,
         )
+        self._registry_lock = threading.Lock()
+        self._registry_signature_value = self._registry_signature()
         self._embedder_lock = threading.Lock()
         self._default_dsn = self._require_default_dsn()
         self._default_embedder = os.getenv("LLM_CONTEXT_EMBEDDER", "local-st")
@@ -84,6 +87,11 @@ class MCPHandler:
         self._max_query_embedding_items = int(
             os.getenv("LLM_CONTEXT_MAX_QUERY_EMBEDDING_ITEMS", "4096")
         )
+        self._default_max_chars = int(os.getenv("LLM_CONTEXT_MAX_CHARS", "12000"))
+        self._max_top_k = max(1, int(os.getenv("LLM_CONTEXT_MAX_TOP_K", "50")))
+        self._max_symbol_limit = max(1, int(os.getenv("LLM_CONTEXT_MAX_SYMBOL_LIMIT", "200")))
+        self._max_chars_limit = max(1, int(os.getenv("LLM_CONTEXT_MAX_CHARS_LIMIT", "100000")))
+        self._max_query_chars = max(1, int(os.getenv("LLM_CONTEXT_MAX_QUERY_CHARS", "8000")))
         self._embedder_cache: dict[str, Embedder] = {}
         self._query_cache: dict[str, dict[str, Any]] = {}
         self._query_cache_lock = threading.Lock()
@@ -135,11 +143,7 @@ class MCPHandler:
 
     def _warmup_embedder(self) -> None:
         try:
-            args = {
-                "embedder": self._default_embedder,
-                "local_model": self._default_local_model,
-            }
-            self._get_embedder(args, self._default_embedding_dim)
+            self._get_embedder()
             sys.stderr.write(
                 f"[INFO] Embedder warmup completed: {self._default_local_model}\n"
             )
@@ -184,7 +188,7 @@ class MCPHandler:
                         "resources": {},
                         "prompts": {},
                     },
-                    "serverInfo": {"name": "llm-context-mcp", "version": "0.2.0"},
+                    "serverInfo": {"name": "llm-context-mcp", "version": __version__},
                 },
             }
 
@@ -305,22 +309,27 @@ class MCPHandler:
         }
         sys.stderr.write(f"[MCP_ACTIVITY] {json.dumps(record, ensure_ascii=True, cls=UUIDEncoder)}\n")
 
-    def _make_cache_key(self, args: dict[str, Any]) -> Optional[str]:
-        """Build a deterministic cache key from query args. Returns None if not cacheable."""
-        query_text = args.get("query_text")
+    def _make_cache_key(self, params: dict[str, Any]) -> Optional[str]:
+        """Build a deterministic cache key from resolved query params. Returns None if not cacheable."""
+        query_text = params.get("query_text")
         if not query_text:
             return None
-        import hashlib as _hashlib
         key_data = {
-            "project_id": str(args.get("project_id") or ""),
+            "project_id": str(params.get("project_id") or ""),
             "query_text": str(query_text).strip().lower(),
-            "path_prefix": str(args.get("path_prefix") or "").strip().lower(),
-            "top_k": int(args.get("top_k", 8)),
-            "doc_type": str(args.get("doc_type") or ""),
-            "language": str(args.get("language") or ""),
+            "path_prefix": str(params.get("path_prefix") or "").strip().lower(),
+            "file": str(params.get("file") or "").strip().lower(),
+            "top_k": int(params.get("top_k") or 0),
+            "max_chars": int(params.get("max_chars") or 0),
+            "auto_scope": bool(params.get("auto_scope")),
+            "doc_type": str(params.get("doc_type") or ""),
+            "language": str(params.get("language") or ""),
+            "embedder": str(self._default_embedder).strip().lower(),
+            "local_model": str(self._default_local_model),
+            "embedding_dim": int(self._default_embedding_dim),
         }
         raw = json.dumps(key_data, sort_keys=True)
-        return _hashlib.sha256(raw.encode()).hexdigest()
+        return hashlib.sha256(raw.encode()).hexdigest()
 
     def _get_cached(self, cache_key: str) -> Optional[dict[str, Any]]:
         with self._query_cache_lock:
@@ -345,36 +354,55 @@ class MCPHandler:
         query_embedding = args.get("query_embedding")
         if query_text is None and query_embedding is None:
             raise ValueError("query_text or query_embedding is required")
-
-        # Serve from cache when possible (only for text queries, not embedding queries)
-        if query_embedding is None and tool_name == "rag_context":
-            cache_key = self._make_cache_key(args)
-            if cache_key:
-                cached = self._get_cached(cache_key)
-                if cached is not None:
-                    self._log_activity("query_cache_hit", {"tool": tool_name, "project_id": args.get("project_id")})
-                    return cached
+        if query_text is not None and len(str(query_text)) > self._max_query_chars:
+            raise ValueError(
+                f"query_text exceeds maximum allowed length ({self._max_query_chars} characters)"
+            )
+        self._reject_client_embedder_overrides(args)
 
         project_id = self._resolve_project_id(args, tool_name=tool_name)
-        top_k = int(args.get("top_k", 8))
+        top_k = self._top_k_arg(args)
         path_prefix = args.get("path_prefix")
         file_path = args.get("file")
         auto_scope = parse_bool(str(args.get("auto_scope", True)))
         explicit_scope = bool(path_prefix or file_path)
-        default_max_chars = int(os.getenv("LLM_CONTEXT_MAX_CHARS", "12000"))
-        max_chars = int(args.get("max_chars", default_max_chars))
+        max_chars = self._max_chars_arg(args)
         doc_type = args.get("doc_type") or self._config.default_doc_type
         language = args.get("language")
-        embedding_dim = int(args.get("embedding_dim", self._default_embedding_dim))
+        embedding_dim = self._default_embedding_dim
         self._validate_query_embedding(query_embedding, embedding_dim)
-        embedder = self._get_embedder(args, embedding_dim)
 
+        cache_key: Optional[str] = None
+        if query_embedding is None and tool_name == "rag_context":
+            cache_key = self._make_cache_key(
+                {
+                    "project_id": project_id,
+                    "query_text": query_text,
+                    "path_prefix": path_prefix,
+                    "file": file_path,
+                    "top_k": top_k,
+                    "max_chars": max_chars,
+                    "auto_scope": auto_scope,
+                    "doc_type": doc_type,
+                    "language": language,
+                }
+            )
+            if cache_key:
+                cached = self._get_cached(cache_key)
+                if cached is not None:
+                    self._log_activity("query_cache_hit", {"tool": tool_name, "project_id": project_id})
+                    return cached
+
+        embedder = self._get_embedder()
+
+        project_record = self._project_registry.get_project(project_id)
         resolved_prefix = resolve_path_prefix(
             path_prefix=path_prefix,
             file_path=file_path,
             query_text=query_text,
             auto_scope=auto_scope,
-            scope_map=self._config.scope_map,
+            scope_map=self._project_setting(project_record, "scope_map"),
+            path_aliases=self._project_setting(project_record, "path_aliases"),
         )
         self._log_activity(
             "query_in",
@@ -409,6 +437,7 @@ class MCPHandler:
                 max_chunks_per_doc=self._config.max_chunks_per_doc,
                 min_score=min_score,
                 header_penalty=self._config.header_penalty,
+                fts_config=self._config.fts_config,
             )
 
         effective_min_score = self._config.min_score
@@ -499,10 +528,8 @@ class MCPHandler:
             },
         )
         # Cache successful results only
-        if results and query_embedding is None and tool_name == "rag_context":
-            cache_key = self._make_cache_key(args)
-            if cache_key:
-                self._set_cache(cache_key, payload)
+        if results and cache_key:
+            self._set_cache(cache_key, payload)
         return payload
 
     def _run_rag_search(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -550,7 +577,7 @@ class MCPHandler:
         functional_context = base.get("functional_context") or {}
         meta = base.get("meta") or {}
         project_id = str(meta.get("project_id") or "")
-        embedding_dim = int(args.get("embedding_dim", self._default_embedding_dim))
+        embedding_dim = self._default_embedding_dim
 
         include_symbols = parse_bool(str(args.get("include_symbols", True)))
         explain = parse_bool(str(args.get("explain", False)))
@@ -630,6 +657,7 @@ class MCPHandler:
 
     def _run_context_info(self) -> dict[str, Any]:
         """Describe scope and boundaries of llm-context MCP."""
+        self._refresh_project_registry_if_changed()
         database_runtime = self._augment_database_runtime_summary(
             self._get_database_runtime_summary()
         )
@@ -644,7 +672,7 @@ class MCPHandler:
             "storage_target": self._build_storage_target_summary(),
             "database_runtime": database_runtime,
             "runtime_readiness": runtime_readiness,
-            "purpose": "Recupero contesto da codice/documenti indicizzati (RAG).",
+            "purpose": "Retrieve context from indexed code and documents (RAG).",
             "write_enabled": self._config.write_enabled,
             "ingest_enabled": self._config.ingest_enabled,
             "project_count": self._project_registry.project_count(),
@@ -657,51 +685,51 @@ class MCPHandler:
                 {
                     "step": "1",
                     "tool": "context_info",
-                    "reason": "capisci ruoli, limiti e strumenti disponibili prima di scegliere il flusso",
+                    "reason": "understand roles, limits and available tools before choosing a workflow",
                 },
                 {
                     "step": "2",
                     "tool": "rag_context",
-                    "reason": "ottieni il package principale per iniziare a lavorare sul codice",
+                    "reason": "get the main context package to start working on the code",
                 },
                 {
                     "step": "3",
                     "tool": "symbol_search",
-                    "reason": "entra dopo rag_context quando servono linee o signature esatte",
+                    "reason": "use it after rag_context when you need exact lines or signatures",
                 },
             ],
             "search_levels": [
                 {
                     "level": "wide",
                     "tool": "rag_search",
-                    "goal": "esplorazione larga quando non conosci file o simboli",
-                    "query_shape": "2-4 termini dominio, senza parole troppo generiche o miste",
-                    "example": "interscambio sdi fatture",
-                    "next_step": "scegli un file o un simbolo dai result_groups",
+                    "goal": "broad exploration when you do not know the files or symbols yet",
+                    "query_shape": "2-4 domain terms, avoiding overly generic or mixed words",
+                    "example": "invoice export pipeline",
+                    "next_step": "pick a file or a symbol from result_groups",
                 },
                 {
                     "level": "symbolic",
                     "tool": "symbol_search",
-                    "goal": "precisione su classi, metodi, interfacce, endpoint o modelli",
-                    "query_shape": "nome simbolo o prefisso tecnico",
-                    "example": "Interscambio",
-                    "next_step": "usa source_path e line_start per aprire il codice esatto",
+                    "goal": "precision on classes, methods, interfaces, endpoints or models",
+                    "query_shape": "symbol name or technical prefix",
+                    "example": "InvoiceExporter",
+                    "next_step": "use source_path and line_start to open the exact code",
                 },
                 {
                     "level": "specific",
                     "tool": "rag_context",
-                    "goal": "contesto operativo su file/scope dopo aver individuato l'area",
-                    "query_shape": "domanda tecnica con path_prefix o file esplicito",
-                    "example": "query_text='flusso stato SDI' path_prefix='pubblico\\\\api\\\\Controllers\\\\Interscambio.cs'",
-                    "next_step": "lavora sui core_files e verifica con symbol_search",
+                    "goal": "working context on a file or scope once the area is known",
+                    "query_shape": "technical question with an explicit path_prefix or file",
+                    "example": "query_text='invoice export status flow' path_prefix='src/billing/invoice_exporter.py'",
+                    "next_step": "work on core_files and verify with symbol_search",
                 },
             ],
             "tool_roles": {
                 "rag_context": {
                     "role": "default working tool",
                     "use_when": [
-                        "devi ottenere velocemente il pacchetto di contesto piu' utile per lavorare sul codice",
-                        "vuoi entry point, file core e contesto assemblato invece dei soli hit raw",
+                        "you need the most useful context package to work on the code quickly",
+                        "you want entry points, core files and assembled context instead of raw hits only",
                     ],
                     "returns": [
                         "functional_context",
@@ -715,24 +743,24 @@ class MCPHandler:
                 "rag_search": {
                     "role": "targeted research and deep inspection",
                     "use_when": [
-                        "vuoi vedere i match raw del retrieval",
-                        "devi approfondire, confermare o debuggare la copertura della query",
+                        "you want to see the raw retrieval matches",
+                        "you need to dig deeper, confirm or debug query coverage",
                     ],
                     "returns": ["results", "summary", "result_groups", "investigation_hints", "meta"],
                 },
                 "symbol_search": {
                     "role": "precision lookup",
                     "use_when": [
-                        "devi trovare signature e linee esatte di un simbolo",
-                        "devi disambiguare nomi tecnici emersi da rag_context",
+                        "you need the exact signature and lines of a symbol",
+                        "you need to disambiguate technical names surfaced by rag_context",
                     ],
                     "returns": ["results", "count"],
                 },
                 "map_work_item_to_codebase": {
                     "role": "functional-to-codebase mapping",
                     "use_when": [
-                        "parti da ticket, work item o richiesta funzionale",
-                        "vuoi repo_target, area, path e hint implementativo strutturati",
+                        "you start from a ticket, work item or functional request",
+                        "you want a structured repo_target, area, paths and implementation hint",
                     ],
                     "returns": [
                         "product_target",
@@ -746,90 +774,90 @@ class MCPHandler:
             },
             "decision_guide": [
                 {
-                    "if": "hai una query multi-termine mista tipo 'endpoint WCF fatture interscambio SDI'",
+                    "if": "you have a mixed multi-term query such as 'REST endpoint invoice export status'",
                     "use": ["rag_search wide", "symbol_search symbolic", "rag_context specific"],
-                    "because": "prima allarga sui termini dominio, poi fissa simbolo/file, infine chiedi il contesto sullo scope corretto",
+                    "because": "first widen on domain terms, then pin down the symbol or file, finally ask for context on the right scope",
                 },
                 {
-                    "if": "stai partendo da una query tecnica e vuoi il contesto giusto per lavorare",
+                    "if": "you start from a technical query and want the right context to work",
                     "use": ["rag_context"],
-                    "because": "e' il tool principale e restituisce package funzionale, entry point e file core",
+                    "because": "it is the main tool and returns the functional package, entry points and core files",
                 },
                 {
-                    "if": "stai partendo da ticket, work item o richiesta funzionale",
+                    "if": "you start from a ticket, work item or functional request",
                     "use": ["map_work_item_to_codebase", "rag_context"],
-                    "because": "prima mappi la richiesta sulla codebase, poi apri il contesto operativo",
+                    "because": "first map the request onto the codebase, then open the working context",
                 },
                 {
-                    "if": "vuoi capire perche' il retrieval prende certi hit o vuoi vedere i match grezzi",
+                    "if": "you want to understand why retrieval picks certain hits or see the raw matches",
                     "use": ["rag_search"],
-                    "because": "restituisce raw hits, gruppi per file e hint di investigazione senza assembly",
+                    "because": "it returns raw hits, per-file groups and investigation hints without assembly",
                 },
                 {
-                    "if": "devi trovare una signature precisa, linee esatte o disambiguare un simbolo",
+                    "if": "you need a precise signature, exact lines or to disambiguate a symbol",
                     "use": ["symbol_search"],
-                    "because": "e' il tool di precisione e segue i suggerimenti simbolici emersi da rag_context",
+                    "because": "it is the precision tool and follows the symbol hints surfaced by rag_context",
                 },
                 {
-                    "if": "non sai quale project_id usare",
+                    "if": "you do not know which project_id to use",
                     "use": ["list_projects", "get_project_info"],
-                    "because": "devi scegliere prima il project scope corretto del read-plane",
+                    "because": "you must choose the correct read-plane project scope first",
                 },
             ],
             "capabilities": [
-                "rag_context: contesto formattato per analisi codice/documenti",
-                "rag_search: risultati raw di retrieval semantico/keyword",
-                "map_work_item_to_codebase: mapping strutturato tra richiesta funzionale e codebase",
-                "symbol_search: lookup esatto/prefisso simboli per nome (class/function/method/...)",
-                "list_projects: elenco dei progetti registrati",
-                "get_project_info: dettaglio di un progetto registrato",
+                "rag_context: formatted context for code and document analysis",
+                "rag_search: raw semantic and keyword retrieval results",
+                "map_work_item_to_codebase: structured mapping between a functional request and the codebase",
+                "symbol_search: exact or prefix symbol lookup by name (class/function/method/...)",
+                "list_projects: list of registered projects",
+                "get_project_info: details of a registered project",
             ],
             "usage_notes": {
                 "rag_context": (
-                    "Tool principale per lavorare: restituisce un package funzionale assemblato di default."
+                    "Main working tool: returns an assembled functional package by default."
                 ),
                 "rag_search": (
-                    "Tool di approfondimento/raw: restituisce hit grezzi, gruppi per file e hint di investigazione."
+                    "Deep-dive/raw tool: returns raw hits, per-file groups and investigation hints."
                 ),
                 "map_work_item_to_codebase": (
-                    "Tool strutturato per mappare richieste funzionali o ticket verso prodotto/repo/area."
+                    "Structured tool to map functional requests or tickets to product, repository and area."
                 ),
                 "symbol_search": (
-                    "Tool di precisione per lookup simboli; utile per disambiguare nomi tecnici ed entry point."
+                    "Precision tool for symbol lookup; useful to disambiguate technical names and entry points."
                 ),
             },
             "recommended_workflows": [
                 {
-                    "goal": "cercare in tre livelli",
+                    "goal": "search in three levels",
                     "steps": [
-                        "wide: rag_search con termini dominio",
-                        "symbolic: symbol_search sui nomi emersi",
-                        "specific: rag_context con path_prefix/file",
+                        "wide: rag_search with domain terms",
+                        "symbolic: symbol_search on the surfaced names",
+                        "specific: rag_context with path_prefix/file",
                     ],
                 },
                 {
-                    "goal": "iniziare a lavorare su una query tecnica",
-                    "steps": ["context_info", "rag_context", "symbol_search (se servono linee/signature esatte)"],
+                    "goal": "start working on a technical query",
+                    "steps": ["context_info", "rag_context", "symbol_search (when exact lines or signatures are needed)"],
                 },
                 {
-                    "goal": "approfondire o debuggare il retrieval",
+                    "goal": "dig into or debug retrieval",
                     "steps": ["rag_context", "rag_search", "symbol_search"],
                 },
                 {
-                    "goal": "partire da ticket o richiesta funzionale",
+                    "goal": "start from a ticket or functional request",
                     "steps": ["map_work_item_to_codebase", "rag_context", "symbol_search"],
                 },
             ],
             "anti_patterns": [
-                "non usare rag_search come primo tool se il tuo obiettivo e' iniziare a lavorare sul codice",
-                "non usare symbol_search per esplorazione larga: parte meglio da rag_context o map_work_item_to_codebase",
-                "non aspettarti che context_info faccia retrieval: serve a scegliere il tool giusto, non a recuperare contesto",
+                "do not use rag_search as the first tool when your goal is to start working on the code",
+                "do not use symbol_search for broad exploration: start from rag_context or map_work_item_to_codebase",
+                "do not expect context_info to perform retrieval: it helps choose the right tool, it does not fetch context",
             ],
             "boundaries": [
-                "NON e' un sistema di memoria operativa persistente",
-                "NON sostituisce llm-memory per decisioni/preferenze operative",
-                "Le query read-plane richiedono sempre project_id esplicito",
-                "L'ingest non e' esposto come tool MCP standard",
+                "It is NOT a persistent operational memory system",
+                "It does NOT replace llm-memory for operational decisions or preferences",
+                "Read-plane queries always require an explicit project_id",
+                "Ingest is not exposed as a standard MCP tool",
             ],
         }
 
@@ -842,8 +870,9 @@ class MCPHandler:
         kind = args.get("kind") or None
         language = args.get("language") or None
         exact = parse_bool(str(args.get("exact", False)))
-        limit = int(args.get("limit", 20))
-        embedding_dim = int(args.get("embedding_dim", self._default_embedding_dim))
+        limit = _bounded_int_arg(args, "limit", default=20, maximum=self._max_symbol_limit)
+        self._reject_client_embedder_overrides(args)
+        embedding_dim = self._default_embedding_dim
         self._log_activity(
             "query_in",
             {
@@ -895,7 +924,7 @@ class MCPHandler:
         rag_args = {
             "query_text": mapping_query,
             "project_id": project_id,
-            "top_k": int(args.get("top_k", 8)),
+            "top_k": self._top_k_arg(args),
             "auto_scope": False,
             "format": "json",
         }
@@ -913,6 +942,8 @@ class MCPHandler:
             product_target_hint=args.get("product_target_hint"),
             project_record=project_record or type("ProjectStub", (), {"project_id": project_id, "root_path": project_id})(),
             functional_context=rag_payload.get("functional_context") or {},
+            product_targets=self._project_setting(project_record, "product_targets"),
+            product_aliases=self._project_setting(project_record, "product_aliases"),
         )
         mapping.update(
             {
@@ -929,6 +960,7 @@ class MCPHandler:
         return mapping
 
     def _run_list_projects(self) -> dict[str, Any]:
+        self._refresh_project_registry_if_changed()
         projects = [
             self._build_project_public_payload(project)
             for project in self._project_registry.list_projects()
@@ -944,6 +976,7 @@ class MCPHandler:
         project_id = str(args.get("project_id") or "").strip()
         if not project_id:
             raise ValueError("'project_id' is required for get_project_info")
+        self._refresh_project_registry_if_changed()
         project = self._project_registry.require_project(project_id)
         return self._build_project_public_payload(project)
 
@@ -1027,6 +1060,7 @@ class MCPHandler:
         return payload
 
     def get_operational_status(self, *, ready: bool) -> dict[str, Any]:
+        self._refresh_project_registry_if_changed()
         projects = [
             self._build_project_status_summary(project)
             for project in self._project_registry.list_projects()
@@ -1112,15 +1146,15 @@ class MCPHandler:
                 "name": "embedder_warmup",
                 "status": "ok" if ready else "pending",
                 "detail": (
-                    "Embedder warmup completato."
+                    "Embedder warmup completed."
                     if ready
-                    else "Embedder warmup ancora in corso."
+                    else "Embedder warmup still in progress."
                 ),
             }
         ]
         if not ready:
             add_blocker("embedder_warmup_in_progress")
-            add_action("Attendere il completamento del warmup embedder prima di usare rag_context.")
+            add_action("Wait for the embedder warmup to finish before using rag_context.")
 
         dedicated_candidate = bool(storage_target.get("dedicated_candidate"))
         deployment_hint = str(storage_target.get("deployment_hint") or "").strip() or "unknown"
@@ -1129,15 +1163,15 @@ class MCPHandler:
                 "name": "storage_target",
                 "status": "ok" if dedicated_candidate else "warning",
                 "detail": (
-                    "Storage target dedicato al runtime."
+                    "Storage target is dedicated to this runtime."
                     if dedicated_candidate
-                    else "Storage target non chiaramente dedicato al runtime."
+                    else "Storage target is not clearly dedicated to this runtime."
                 ),
             }
         )
         if not dedicated_candidate:
             add_warning("storage_target_is_not_clearly_dedicated")
-            add_action("Usare un database dedicato a llm-context per evitare ambiguita' con altri runtime.")
+            add_action("Use a database dedicated to llm-context to avoid ambiguity with other runtimes.")
 
         database_reachable = bool(database_runtime.get("reachable"))
         database_error = str(database_runtime.get("error") or "").strip()
@@ -1146,12 +1180,12 @@ class MCPHandler:
                 "name": "database_connection",
                 "status": "ok" if database_reachable else "error",
                 "detail": (
-                    f"Database PostgreSQL raggiungibile: {database_runtime.get('database') or storage_target.get('database') or '(unknown)'}."
+                    f"PostgreSQL database reachable: {database_runtime.get('database') or storage_target.get('database') or '(unknown)'}."
                     if database_reachable
                     else (
-                        f"Connessione al database fallita: {database_error}"
+                        f"Database connection failed: {database_error}"
                         if database_error
-                        else "Connessione al database fallita."
+                        else "Database connection failed."
                     )
                 ),
             }
@@ -1170,12 +1204,12 @@ class MCPHandler:
                     else ("error" if database_reachable else "pending")
                 ),
                 "detail": (
-                    "Estensione pgvector disponibile."
+                    "pgvector extension available."
                     if pgvector_available is True
                     else (
-                        "Estensione pgvector non trovata nel database target."
+                        "pgvector extension not found in the target database."
                         if database_reachable
-                        else "Verifica pgvector rimandata finche' il database non e' raggiungibile."
+                        else "pgvector check deferred until the database is reachable."
                     )
                 ),
             }
@@ -1198,14 +1232,14 @@ class MCPHandler:
                     else ("error" if database_reachable else "pending")
                 ),
                 "detail": (
-                    "Schema v2 presente sul database target."
+                    "Schema v2 present on the target database."
                     if schema_ready is True
                     else (
-                        "Schema v2 incompleto; tabelle mancanti: "
+                        "Schema v2 incomplete; missing tables: "
                         + ", ".join(missing_tables[:5])
                         if database_reachable and missing_tables
                         else (
-                            "Schema v2 non verificabile finche' il database non e' raggiungibile."
+                            "Schema v2 cannot be verified until the database is reachable."
                         )
                     )
                 ),
@@ -1219,9 +1253,9 @@ class MCPHandler:
         registry_ready = project_count > 0
         registry_status = "ok" if registry_ready else "error"
         registry_detail = (
-            f"{project_count} progetti registrati."
+            f"{project_count} registered project(s)."
             if registry_ready
-            else "Nessun progetto registrato nel registry."
+            else "No project registered in the registry."
         )
         checks.append(
             {
@@ -1232,7 +1266,7 @@ class MCPHandler:
         )
         if not registry_ready:
             add_blocker("no_registered_projects")
-            add_action("Registrare almeno un progetto nel registry prima di usare il read-plane o l'ingest.")
+            add_action("Register at least one project in the registry before using the read-plane or ingest.")
 
         integrity_counts: dict[str, int] = {}
         queryable_projects: list[str] = []
@@ -1250,17 +1284,17 @@ class MCPHandler:
         if queryable_projects:
             indexed_status = "ok"
             indexed_detail = (
-                "Progetti interrogabili: " + ", ".join(queryable_projects[:5])
+                "Queryable projects: " + ", ".join(queryable_projects[:5])
             )
         elif indexing_projects:
             indexed_status = "warning"
             indexed_detail = (
-                "Ingest in corso senza un progetto ancora coerente: "
+                "Ingest in progress without a coherent project yet: "
                 + ", ".join(indexing_projects[:5])
             )
         else:
             indexed_status = "error"
-            indexed_detail = "Nessun progetto attualmente interrogabile."
+            indexed_detail = "No project is currently queryable."
         checks.append(
             {
                 "name": "indexed_projects",
@@ -1272,16 +1306,16 @@ class MCPHandler:
 
         if integrity_counts.get("indexing"):
             add_warning("ingest_in_progress_without_stable_project")
-            add_action("Attendere la fine dell'ingest prima di considerare stabile il runtime.")
+            add_action("Wait for ingest to finish before considering the runtime stable.")
         if integrity_counts.get("not_indexed"):
             add_warning("registered_projects_are_not_indexed")
-            add_action("Eseguire ingest sui progetti registrati prima di usare il runtime in produzione.")
+            add_action("Run ingest on the registered projects before using the runtime in production.")
         if integrity_counts.get("stale"):
             add_warning("registered_projects_have_stale_index_state")
-            add_action("Allineare runtime state e manifest o rieseguire ingest sui progetti stale.")
+            add_action("Align runtime state and manifest, or re-run ingest on stale projects.")
         if integrity_counts.get("unreliable"):
             add_warning("registered_projects_have_unreliable_index_state")
-            add_action("Correggere errori di ingest o manifest prima di fidarsi dei risultati.")
+            add_action("Fix ingest or manifest errors before trusting the results.")
 
         if project_count > 0 and not queryable_projects and not indexing_projects:
             add_blocker("no_project_with_integrity_ok")
@@ -1298,18 +1332,18 @@ class MCPHandler:
 
         if ready_for_queries and status == "ready":
             summary = (
-                f"Runtime pronto: {len(queryable_projects)} progetto/i coerente/i interrogabile/i."
+                f"Runtime ready: {len(queryable_projects)} coherent queryable project(s)."
             )
         elif ready_for_queries:
             summary = (
-                f"Runtime interrogabile ma con segnali da verificare: {len(queryable_projects)} progetto/i coerente/i."
+                f"Runtime queryable but with signals to check: {len(queryable_projects)} coherent project(s)."
             )
         elif indexing_projects:
-            summary = "Runtime avviato ma ancora in attesa di un progetto coerente dopo l'ingest."
+            summary = "Runtime started but still waiting for a coherent project after ingest."
         elif project_count == 0:
-            summary = "Runtime avviato ma senza un progetto verificabile pronto per il read-plane."
+            summary = "Runtime started but no verifiable project is ready for the read-plane."
         else:
-            summary = "Runtime non pronto: nessun progetto con integrity=ok."
+            summary = "Runtime not ready: no project with integrity=ok."
 
         return {
             "status": status,
@@ -1516,7 +1550,53 @@ class MCPHandler:
         return self._validate_known_project(explicit_project_id)
 
     def _validate_known_project(self, project_id: str) -> str:
+        self._refresh_project_registry_if_changed()
         return self._project_registry.require_project(project_id).project_id
+
+    def _project_setting(self, project_record: Any, name: str) -> dict[str, Any]:
+        """Per-project mapping from the registry, falling back to the global config value."""
+        value = getattr(project_record, name, None) if project_record is not None else None
+        if value:
+            return dict(value)
+        return dict(getattr(self._config, name, None) or {})
+
+    def _registry_signature(self) -> tuple[Any, ...]:
+        def mtime(path: Path) -> Optional[int]:
+            try:
+                return path.stat().st_mtime_ns
+            except OSError:
+                return None
+
+        manifest_dir = self._project_registry.manifest_dir
+        manifests: tuple[tuple[str, Optional[int]], ...] = ()
+        if manifest_dir.is_dir():
+            manifests = tuple(
+                sorted((item.name, mtime(item)) for item in manifest_dir.glob("*.index_manifest.json"))
+            )
+        return (
+            mtime(Path(self._config.projects_registry_path)),
+            mtime(Path(self._config.projects_state_path)),
+            manifests,
+        )
+
+    def _refresh_project_registry_if_changed(self) -> bool:
+        """Reload the project registry when the registry, state or manifest files changed on disk."""
+        with self._registry_lock:
+            signature = self._registry_signature()
+            if signature == self._registry_signature_value:
+                return False
+            try:
+                registry = load_project_registry(
+                    self._config.projects_registry_path,
+                    self._config.projects_state_path,
+                )
+            except Exception as exc:
+                sys.stderr.write(f"[WARN] Project registry reload failed, keeping previous registry: {exc}\n")
+                return False
+            self._project_registry = registry
+            self._registry_signature_value = signature
+            sys.stderr.write("[INFO] Project registry reloaded from disk\n")
+            return True
 
     def _query_symbols(
         self,
@@ -1621,10 +1701,48 @@ class MCPHandler:
             if isinstance(item, bool) or not isinstance(item, (int, float)):
                 raise ValueError("query_embedding must contain only numeric values")
 
-    def _get_embedder(self, args: dict[str, Any], embedding_dim: int) -> Embedder:
-        """Get or create embedder with caching."""
-        name = str(args.get("embedder", self._default_embedder)).strip().lower()
-        local_model = args.get("local_model") or self._default_local_model
+    def _top_k_arg(self, args: dict[str, Any]) -> int:
+        return _bounded_int_arg(args, "top_k", default=8, maximum=self._max_top_k)
+
+    def _max_chars_arg(self, args: dict[str, Any]) -> int:
+        return _bounded_int_arg(
+            args,
+            "max_chars",
+            default=min(self._default_max_chars, self._max_chars_limit),
+            maximum=self._max_chars_limit,
+        )
+
+    def _reject_client_embedder_overrides(self, args: dict[str, Any]) -> None:
+        """Embedder, model and dimension are server-side settings only.
+
+        A client value equal to the server setting is ignored for backward
+        compatibility; any other value is rejected so that a client can never
+        make the server load an arbitrary model.
+        """
+        server_values = {
+            "embedder": str(self._default_embedder).strip().lower(),
+            "local_model": str(self._default_local_model).strip(),
+            "embedding_dim": str(self._default_embedding_dim),
+        }
+        for key, server_value in server_values.items():
+            if key not in args or args[key] is None:
+                continue
+            client_value = str(args[key]).strip()
+            if key == "embedder":
+                client_value = client_value.lower()
+            if client_value != server_value:
+                raise ValueError(
+                    f"'{key}' is a server-side setting and cannot be overridden by the client"
+                )
+            sys.stderr.write(
+                f"[WARN] Ignoring deprecated client argument '{key}' (matches server configuration)\n"
+            )
+
+    def _get_embedder(self) -> Embedder:
+        """Get or create the server-configured embedder."""
+        name = str(self._default_embedder).strip().lower()
+        local_model = self._default_local_model
+        embedding_dim = self._default_embedding_dim
         cache_key = f"{name}|{local_model}|{embedding_dim}"
 
         with self._embedder_lock:
@@ -1659,19 +1777,32 @@ class MCPHandler:
             return embedder
 
 
+def _bounded_int_arg(args: dict[str, Any], key: str, *, default: int, maximum: int) -> int:
+    raw = args.get(key)
+    if raw is None:
+        return max(1, min(default, maximum))
+    if isinstance(raw, bool):
+        raise ValueError(f"'{key}' must be an integer")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"'{key}' must be an integer") from exc
+    return max(1, min(value, maximum))
+
+
 def tool_rag_context() -> dict[str, Any]:
     """Return the rag_context tool schema."""
     return {
         "name": "rag_context",
         "description": (
-            "Tool principale del read-plane MCP: restituisce un pacchetto di contesto funzionale "
-            "assemblato da codice/documenti indicizzati, pensato per aiutare un agente a lavorare "
-            "subito sul codice. Include entry point, core files, supporting matches, contesto "
-            "assemblato e hint sui tool di follow-up. Usare solo per context retrieval tecnico; "
-            "non salva memorie operative e non esegue ingest/index refresh. Richiede sempre "
-            "project_id esplicito e non usa alcun default implicito. Per "
-            "write_enabled/ingest_enabled, refresh indice e operazioni di ingest-plane usare "
-            "context_info e la CLI operativa."
+            "Main read-plane MCP tool: returns a functional context package assembled from "
+            "indexed code and documents, designed to help an agent start working on the code "
+            "right away. Includes entry points, core files, supporting matches, assembled "
+            "context and hints for follow-up tools. Use it for technical context retrieval only; "
+            "it does not store operational memories and does not run ingest or index refresh. "
+            "Always requires an explicit project_id and never uses an implicit default. For "
+            "write_enabled/ingest_enabled, index refresh and ingest-plane operations use "
+            "context_info and the operational CLI."
         ),
         "inputSchema": {
             "type": "object",
@@ -1681,7 +1812,7 @@ def tool_rag_context() -> dict[str, Any]:
                 "project_id": {
                     "type": "string",
                     "description": (
-                        "Project scope per la retrieval. E' sempre obbligatorio e deve riferirsi a un progetto registrato nel registry."
+                        "Retrieval project scope. Always required; must reference a project registered in the registry."
                     ),
                 },
                 "top_k": {"type": "integer"},
@@ -1689,9 +1820,6 @@ def tool_rag_context() -> dict[str, Any]:
                 "file": {"type": "string"},
                 "auto_scope": {"type": "boolean"},
                 "max_chars": {"type": "integer"},
-                "embedder": {"type": "string"},
-                "embedding_dim": {"type": "integer"},
-                "local_model": {"type": "string"},
                 "doc_type": {"type": "string"},
                 "language": {"type": "string"},
                 "format": {
@@ -1708,11 +1836,11 @@ def tool_rag_full_context() -> dict[str, Any]:
     base = tool_rag_context()
     base["name"] = "rag_full_context"
     base["description"] = (
-        "Tool all-in-one del read-plane MCP: esegue rag_context e aggiunge automaticamente "
-        "simboli, decision_points (dove agire e impatto stimato) e caller sites per gli "
-        "entry point trovati. Ideale per task di modifica codice dove serve capire subito "
-        "'quali linee toccare e cosa si rompe'. Ritorna confidence, fallback_used, "
-        "snapshot_available. Richiede sempre project_id esplicito."
+        "All-in-one read-plane MCP tool: runs rag_context and automatically adds symbols, "
+        "decision_points (where to act and estimated impact) and caller sites for the entry "
+        "points found. Ideal for code change tasks where you need to know right away which "
+        "lines to touch and what may break. Returns confidence, fallback_used and "
+        "snapshot_available. Always requires an explicit project_id."
     )
     props = dict(base["inputSchema"]["properties"])
     props["include_symbols"] = {
@@ -1732,13 +1860,13 @@ def tool_rag_search() -> dict[str, Any]:
     tool = tool_rag_context()
     tool["name"] = "rag_search"
     tool["description"] = (
-        "Tool di approfondimento del read-plane MCP: restituisce match RAG raw su "
-        "codice/documenti indicizzati senza context assembly. Usarlo per ricerca mirata, "
-        "debug del retrieval, conferme puntuali o quando serve vedere i risultati grezzi oltre "
-        "il pacchetto principale di rag_context. Non e' un memory store operativo e non esegue "
-        "ingest o refresh indice. Richiede sempre project_id esplicito e non usa alcun default implicito."
+        "Deep-dive read-plane MCP tool: returns raw RAG matches over indexed code and "
+        "documents without context assembly. Use it for targeted research, retrieval "
+        "debugging, spot checks, or when you need the raw results beyond the main "
+        "rag_context package. It is not an operational memory store and does not run ingest "
+        "or index refresh. Always requires an explicit project_id and never uses an implicit default."
     )
-    tool["inputSchema"]["properties"]["format"]["description"] = "investigation (default) oppure json"
+    tool["inputSchema"]["properties"]["format"]["description"] = "investigation (default) or json"
     return tool
 
 
@@ -1746,9 +1874,9 @@ def tool_map_work_item_to_codebase() -> dict[str, Any]:
     return {
         "name": "map_work_item_to_codebase",
         "description": (
-            "Mappa una richiesta funzionale o ticket verso la codebase indicizzata e restituisce "
-            "un payload strutturato con repo_target, area, fattibilita', hint implementativo, path "
-            "rilevanti e blocker. Usa il motore di contesto funzionale del read-plane."
+            "Maps a functional request or ticket onto the indexed codebase and returns a "
+            "structured payload with repo_target, area, feasibility, implementation hint, "
+            "relevant paths and blockers. Uses the read-plane functional context engine."
         ),
         "inputSchema": {
             "type": "object",
@@ -1760,7 +1888,7 @@ def tool_map_work_item_to_codebase() -> dict[str, Any]:
                 "product_target_hint": {"type": "string"},
                 "project_id": {
                     "type": "string",
-                    "description": "Project scope esplicito. Preferito quando disponibile.",
+                    "description": "Explicit project scope. Always required.",
                 },
                 "path_prefix": {"type": "string"},
                 "doc_type": {"type": "string"},
@@ -1776,8 +1904,8 @@ def tool_context_info() -> dict[str, Any]:
     return {
         "name": "context_info",
         "description": (
-            "Tool di discovery del server: espone scopo, limiti, tool disponibili, ruoli "
-            "consigliati e workflow d'uso del MCP llm-context."
+            "Server discovery tool: describes purpose, limits, available tools, recommended "
+            "roles and usage workflows of the llm-context MCP server."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     }
@@ -1786,7 +1914,7 @@ def tool_context_info() -> dict[str, Any]:
 def tool_list_projects() -> dict[str, Any]:
     return {
         "name": "list_projects",
-        "description": "Elenca i progetti registrati e il relativo stato operativo di ingest/index.",
+        "description": "Lists the registered projects and their ingest/index operational status.",
         "inputSchema": {"type": "object", "properties": {}},
     }
 
@@ -1794,7 +1922,7 @@ def tool_list_projects() -> dict[str, Any]:
 def tool_get_project_info() -> dict[str, Any]:
     return {
         "name": "get_project_info",
-        "description": "Restituisce il dettaglio operativo di un progetto registrato.",
+        "description": "Returns the operational details of a registered project.",
         "inputSchema": {
             "type": "object",
             "required": ["project_id"],
@@ -1810,12 +1938,12 @@ def tool_symbol_search() -> dict[str, Any]:
     return {
         "name": "symbol_search",
         "description": (
-            "Cerca simboli (class, function, method, interface, enum, struct, type) per nome "
-            "nel codice indicizzato. E' il tool di precisione da usare dopo rag_context quando "
-            "serve disambiguare nomi tecnici, trovare signature/linee esatte o confermare "
-            "entry point specifici. E' un tool di read-plane: non aggiorna l'indice e non fa "
-            "operazioni di ingest-plane. Richiede sempre project_id esplicito. Restituisce "
-            "line_start, line_end, signature e path del file."
+            "Searches symbols (class, function, method, interface, enum, struct, type) by name "
+            "in the indexed code. It is the precision tool to use after rag_context when you "
+            "need to disambiguate technical names, find exact signatures or lines, or confirm "
+            "specific entry points. It is a read-plane tool: it does not update the index and "
+            "does not perform ingest-plane operations. Always requires an explicit project_id. "
+            "Returns line_start, line_end, signature and file path."
         ),
         "inputSchema": {
             "type": "object",
@@ -1823,28 +1951,27 @@ def tool_symbol_search() -> dict[str, Any]:
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Nome (o prefisso) del simbolo da cercare",
+                    "description": "Symbol name (or prefix) to search for",
                 },
                 "kind": {
                     "type": "string",
-                    "description": "Filtro tipo: class | function | method | interface | enum | struct | type",
+                    "description": "Kind filter: class | function | method | interface | enum | struct | type",
                 },
                 "project_id": {
                     "type": "string",
                     "description": (
-                        "Project scope per la ricerca simboli. E' sempre obbligatorio e deve riferirsi a un progetto registrato nel registry."
+                        "Symbol search project scope. Always required; must reference a project registered in the registry."
                     ),
                 },
                 "language": {
                     "type": "string",
-                    "description": "Filtro linguaggio: python | javascript | typescript | csharp",
+                    "description": "Language filter: python | javascript | typescript | csharp",
                 },
                 "exact": {
                     "type": "boolean",
-                    "description": "Se true: match esatto (case-insensitive); se false (default): match prefisso",
+                    "description": "If true: exact match (case-insensitive); if false (default): prefix match",
                 },
                 "limit": {"type": "integer"},
-                "embedding_dim": {"type": "integer"},
             },
         },
     }
@@ -1854,10 +1981,10 @@ def tool_get_project_snapshot() -> dict[str, Any]:
     return {
         "name": "get_project_snapshot",
         "description": (
-            "Carica lo snapshot pre-compilato di un progetto: CONTEXT.md (mappa orientativa "
-            "dell'intera codebase), indice simboli e aree funzionali. "
-            "Usarlo come prima call di sessione per orientarsi senza consumare query live. "
-            "Lo snapshot va generato offline con: "
+            "Loads the pre-computed snapshot of a project: CONTEXT.md (orientation map of the "
+            "whole codebase), symbol index and functional areas. "
+            "Use it as the first call of a session to get oriented without spending live queries. "
+            "The snapshot is generated offline with: "
             "python cli.py export-snapshot --project-id <id> --dsn $DSN --output .local/snapshots"
         ),
         "inputSchema": {
@@ -1866,12 +1993,12 @@ def tool_get_project_snapshot() -> dict[str, Any]:
             "properties": {
                 "project_id": {
                     "type": "string",
-                    "description": "ID del progetto registrato",
+                    "description": "Registered project id",
                 },
                 "part": {
                     "type": "string",
                     "description": (
-                        "Parte da caricare: 'all' (default), 'context_md', "
+                        "Part to load: 'all' (default), 'context_md', "
                         "'symbols', 'areas', 'top_files'"
                     ),
                 },
@@ -1925,11 +2052,11 @@ def format_context_sheet(
     max_chars: int,
 ) -> str:
     """Format results as a structured context sheet."""
-    safe_query = (query_text or "").strip() or "(vuoto)"
+    safe_query = (query_text or "").strip() or "(empty)"
     lines: list[str] = [
         "CONTEXT",
         f"query: {safe_query}",
-        f"scope: {path_prefix or '(nessuno)'}",
+        f"scope: {path_prefix or '(none)'}",
         f"top_k: {top_k}",
         "",
         "MATCHES",
@@ -1970,8 +2097,8 @@ def format_functional_context_text(payload: dict[str, Any]) -> str:
 
     lines: list[str] = [
         "FUNCTIONAL CONTEXT",
-        f"query: {str(query.get('text') or '(vuoto)')}",
-        f"scope: {str(query.get('path_prefix') or '(nessuno)')}",
+        f"query: {str(query.get('text') or '(empty)')}",
+        f"scope: {str(query.get('path_prefix') or '(none)')}",
         (
             "summary: "
             f"core_files={int(summary.get('core_file_count') or 0)} "
@@ -2050,8 +2177,8 @@ def format_rag_search_text(payload: dict[str, Any]) -> str:
 
     lines: list[str] = [
         "RAG SEARCH",
-        f"query: {str(query.get('text') or '(vuoto)')}",
-        f"scope: {str(query.get('path_prefix') or '(nessuno)')}",
+        f"query: {str(query.get('text') or '(empty)')}",
+        f"scope: {str(query.get('path_prefix') or '(none)')}",
         (
             "summary: "
             f"results={int(summary.get('result_count') or 0)} "
@@ -2232,15 +2359,15 @@ def _build_tool_hints(
     suggested_names = symbol_follow_up.get("suggested_names") or []
 
     symbol_reason = (
-        "Usa symbol_search per confermare signature, linee esatte ed entry point rilevanti."
+        "Use symbol_search to confirm signatures, exact lines and relevant entry points."
         if suggested_queries or symbol_results
-        else "Usa symbol_search se devi disambiguare nomi tecnici o verificare un simbolo preciso."
+        else "Use symbol_search to disambiguate technical names or verify a specific symbol."
     )
     raw_reason = (
-        "Usa rag_search per vedere i match raw, approfondire varianti della query o investigare "
-        "oltre il pacchetto principale."
+        "Use rag_search to see raw matches, explore query variants or investigate "
+        "beyond the main package."
         if results
-        else "Usa rag_search con query piu' larghe quando rag_context non restituisce abbastanza segnali."
+        else "Use rag_search with broader queries when rag_context does not return enough signal."
     )
 
     return {
@@ -2260,7 +2387,7 @@ def _build_tool_hints(
             },
             {
                 "tool": "context_info",
-                "reason": "Usa context_info per rileggere ruoli, limiti e workflow consigliati dei tool MCP.",
+                "reason": "Use context_info to review roles, limits and recommended workflows of the MCP tools.",
             },
         ],
     }
@@ -2325,13 +2452,13 @@ def _build_rag_search_hints(
     suggested_symbol_queries = symbol_follow_up.get("suggested_queries") or []
     recommended_next_steps: list[str] = []
     if result_groups:
-        recommended_next_steps.append("Restringi su uno dei file top per confermare il punto giusto del retrieval.")
+        recommended_next_steps.append("Narrow down to one of the top files to confirm the right retrieval spot.")
     if meta.get("auto_scope_fallback_used"):
-        recommended_next_steps.append("L'auto-scope iniziale non ha retto: prova una query piu' esplicita o uno scope manuale.")
+        recommended_next_steps.append("The initial auto-scope did not hold: try a more explicit query or a manual scope.")
     if suggested_symbol_queries:
-        recommended_next_steps.append("Apri i simboli suggeriti con symbol_search per verificare signature e linee esatte.")
+        recommended_next_steps.append("Open the suggested symbols with symbol_search to verify signatures and exact lines.")
     if not result_groups:
-        recommended_next_steps.append("Allarga la query o rimuovi filtri troppo stretti per recuperare segnali raw.")
+        recommended_next_steps.append("Broaden the query or remove overly narrow filters to recover raw signal.")
 
     return {
         "mode": "raw_investigation",
@@ -2426,7 +2553,7 @@ def _build_symbol_follow_up(
                     "exact": False,
                     "source_path": None,
                     "source_role": "query_candidate",
-                    "reason": "Nome tecnico derivato dalla query iniziale.",
+                    "reason": "Technical name derived from the initial query.",
                 }
             )
 
@@ -2443,14 +2570,14 @@ def _symbol_follow_up_reason(*, role: str, kind: Any) -> str:
     normalized_role = str(role or "supporting").strip().lower()
     normalized_kind = str(kind or "").strip().lower()
     if normalized_role == "entry_point":
-        return "Conferma il simbolo di ingresso e le linee esatte della surface applicativa."
+        return "Confirm the entry symbol and the exact lines of the application surface."
     if normalized_role == "implementation":
-        return "Apri il simbolo di implementazione principale collegato al flusso."
+        return "Open the main implementation symbol linked to the flow."
     if normalized_role == "contract":
-        return "Verifica il contratto o l'interfaccia usata nel flusso."
+        return "Check the contract or interface used in the flow."
     if normalized_kind in {"method", "function"}:
-        return "Disambigua il punto eseguibile rilevante emerso dal contesto."
-    return "Verifica il simbolo tecnico piu' rilevante emerso dal contesto."
+        return "Disambiguate the relevant executable point surfaced by the context."
+    return "Check the most relevant technical symbol surfaced by the context."
 
 
 def _classify_database_target(host: Optional[str]) -> tuple[str, str]:
@@ -2486,37 +2613,37 @@ def _classify_database_target(host: Optional[str]) -> tuple[str, str]:
 def _database_unreachable_action(deployment_hint: str) -> str:
     if deployment_hint == "local_or_docker_port_mapping":
         return (
-            "Se usi Postgres locale verifica servizio e porta; se usi Docker con port mapping "
-            "verifica che il container sia attivo e che la porta host del DSN sia esposta."
+            "With a local Postgres check the service and port; with Docker port mapping "
+            "check that the container is running and the DSN host port is published."
         )
     if deployment_hint == "docker_network_alias":
         return (
-            "Se usi Postgres in Docker senza port mapping verifica rete Docker, hostname del servizio/container "
-            "e reachability dall'ambiente MCP."
+            "With Postgres in Docker without port mapping check the Docker network, the service/container "
+            "hostname and reachability from the MCP environment."
         )
     if deployment_hint in {"remote_or_lan_postgres", "remote_or_managed_postgres"}:
         return (
-            "Se usi Postgres remoto o cloud verifica reachability di rete, firewall/VPN, eventuale sslmode "
-            "e credenziali del DSN."
+            "With a remote or cloud Postgres check network reachability, firewall/VPN, sslmode "
+            "and DSN credentials."
         )
-    return "Verificare LLM_CONTEXT_DSN, credenziali runtime e reachability del database PostgreSQL."
+    return "Check LLM_CONTEXT_DSN, runtime credentials and PostgreSQL reachability."
 
 
 def _pgvector_missing_action(deployment_hint: str) -> str:
     if deployment_hint == "remote_or_managed_postgres":
         return (
-            "Verificare che l'istanza PostgreSQL remota supporti pgvector e installare/abilitare "
-            "l'estensione sul database target."
+            "Check that the remote PostgreSQL instance supports pgvector and install/enable "
+            "the extension on the target database."
         )
-    return "Installare o abilitare l'estensione pgvector sul database target prima di usare il runtime."
+    return "Install or enable the pgvector extension on the target database before using the runtime."
 
 
 def _schema_missing_action(deployment_hint: str) -> str:
     if deployment_hint in {"remote_or_lan_postgres", "remote_or_managed_postgres"}:
         return (
-            "Eseguire init-db-v2 contro il PostgreSQL target configurato nel DSN prima di usare il read-plane."
+            "Run init-db-v2 against the PostgreSQL target configured in the DSN before using the read-plane."
         )
-    return "Eseguire init-db-v2 sul database target prima di usare il read-plane."
+    return "Run init-db-v2 on the target database before using the read-plane."
 
 
 def _derive_symbol_candidates(query_text: Any, *, limit: int = 4) -> list[str]:

@@ -1,11 +1,10 @@
 @echo off
-REM Esegue ingest sul progetto canonico di llm-context.
+REM Incremental ingest of a registered project. Usage: ingest.bat [project_id] [extra cli args]
 
 cd /d "%~dp0\.."
 
 if "%LLM_CONTEXT_DSN%"=="" (
-  echo [ERRORE] LLM_CONTEXT_DSN non impostato.
-  echo [INFO] Passa il DSN al processo dal PowerShell di lancio oppure dalla dashboard MCP.
+  echo [ERROR] LLM_CONTEXT_DSN is not set.
   exit /b 1
 )
 
@@ -18,8 +17,7 @@ if "%PROJECT_ID%"=="" (
 )
 
 if "%PROJECT_ID%"=="" (
-  echo [ERRORE] project_id non impostato.
-  echo [INFO] Passa il project_id come primo argomento oppure imposta LLM_CONTEXT_PROJECT_ID nel processo.
+  echo [ERROR] project_id is not set. Pass it as the first argument or set LLM_CONTEXT_PROJECT_ID.
   exit /b 1
 )
 

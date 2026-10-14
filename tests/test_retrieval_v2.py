@@ -17,14 +17,14 @@ class TestRetrievalV2(unittest.TestCase):
         expected = os.getenv("LLM_CONTEXT_TEST_EXPECTED_PATH")
         embedder = LocalHashEmbedder(dim=384)
         conn = get_connection(dsn)
-        store = RagStore(conn, 384)
+        store = RagStore(conn, 384, os.getenv("LLM_CONTEXT_TEST_FTS_CONFIG", "simple"))
 
         results, _ = retrieve_v2(
             store=store,
             embedder=embedder,
             repo_id=repo_id,
             top_k=5,
-            text="menu permessi",
+            text="project registry",
         )
 
         self.assertIsInstance(results, list)

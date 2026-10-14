@@ -1,113 +1,100 @@
 """
-MCP Server HTTP/SSE wrapper for persistent operation.
+MCP Server HTTP wrapper for persistent operation.
 
 Run this server manually BEFORE opening your MCP client/editor.
 The model will be loaded once and stay in memory.
 
 Usage:
   python mcp_server_http.py
+  llm-context serve --transport http
 
-Then configure mcp_config.json to use:
+Then configure your MCP client to use:
   "command": "npx",
   "args": ["-y", "mcp-remote", "http://localhost:8765/mcp", "--transport", "http-only"]
 
 Environment variables:
-  MCP_HOST  - bind address (default: 127.0.0.1)
-  MCP_PORT  - bind port (default: 8765)
+  MCP_HOST        - bind address (default: 127.0.0.1)
+  MCP_PORT        - bind port (default: 8765)
+  MCP_AUTH_TOKEN  - optional bearer token required on every endpoint;
+                    mandatory when MCP_HOST is not a loopback address
 
-If the port is occupied by a previous instance of this server,
-it will be killed automatically before binding.
+Only one instance per checkout can run at a time (file lock). A running
+instance is never killed automatically: stop it first.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hmac
+import ipaddress
 import json
 import logging
 import os
-import re
 import socket
 import sys
-import threading
-import time
+import uuid
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlsplit
-import uuid
 
-# Force project path for local imports
+from aiohttp import web
+
 _ROOT_DIR = Path(__file__).resolve().parent
 if str(_ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(_ROOT_DIR))
 
-from rag_indexer.mcp_handler import MCPHandler, UUIDEncoder, tool_rag_context
+from rag_indexer.mcp_handler import MCPHandler, UUIDEncoder, tool_rag_context  # noqa: E402
 
 log = logging.getLogger("mcp_server_http")
 _IS_WINDOWS = os.name == "nt"
 _DEFAULT_HTTP_LOG_MAX_BYTES = 1_048_576
 _DEFAULT_HTTP_LOG_BACKUP_COUNT = 3
 _DEFAULT_MAX_REQUEST_BYTES = 1_048_576
+_DEPRECATED_CLIENT_ARGUMENTS: dict[str, dict[str, Any]] = {
+    "embedder": {"type": "string"},
+    "local_model": {"type": "string"},
+    "embedding_dim": {"type": "integer"},
+}
 
-# ---------------------------------------------------------------------------
-# Single-instance guard (file lock)
-# ---------------------------------------------------------------------------
 _LOCK_PATH = _ROOT_DIR / ".mcp_server.lock"
-_lock_file_handle = None  # kept open for process lifetime
+_PID_PATH = _ROOT_DIR / ".mcp_server.pid"
+_lock_file_handle = None
 
 
 def _acquire_instance_lock() -> bool:
-    """Try to acquire a file-based single-instance lock.
-    If a stale lock exists from an old server, kill it and retry."""
+    """Acquire the single-instance file lock. Returns False if another live instance holds it."""
     global _lock_file_handle
-
-    def _try_lock() -> bool:
-        global _lock_file_handle
-        try:
-            _lock_file_handle = open(_LOCK_PATH, "a+")
-            _lock_file_handle.seek(0)
-            first_byte = _lock_file_handle.read(1)
-            if first_byte == "":
-                _lock_file_handle.seek(0)
-                _lock_file_handle.write("0")
-                _lock_file_handle.flush()
-            _lock_file_handle.seek(0)
-            _lock_file(_lock_file_handle)
-            _lock_file_handle.seek(0)
-            _lock_file_handle.truncate()
-            _lock_file_handle.write(str(os.getpid()))
-            _lock_file_handle.flush()
-            return True
-        except (OSError, IOError):
-            if _lock_file_handle:
-                _lock_file_handle.close()
-                _lock_file_handle = None
-            return False
-
-    if _try_lock():
-        return True
-
-    # Lock held by someone else — read old PID and try to kill it
-    old_pid = _read_lock_pid()
-    if old_pid is not None and old_pid != os.getpid():
-        log.warning("Lock held by old PID %d, killing it...", old_pid)
-        _kill_old_server(old_pid)
-        time.sleep(1)
-    elif old_pid is None:
-        # Stale/empty lock file left after abnormal termination.
-        try:
-            _LOCK_PATH.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    # Retry after killing
-    return _try_lock()
+    handle = None
+    try:
+        handle = open(_LOCK_PATH, "a+")  # noqa: SIM115
+        handle.seek(0)
+        if handle.read(1) == "":
+            handle.seek(0)
+            handle.write("0")
+            handle.flush()
+        handle.seek(0)
+        _lock_file(handle)
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()))
+        handle.flush()
+    except OSError:
+        if handle is not None:
+            handle.close()
+        return False
+    _lock_file_handle = handle
+    try:
+        _PID_PATH.write_text(str(os.getpid()), encoding="ascii")
+    except OSError:
+        pass
+    return True
 
 
 def _read_lock_pid() -> Optional[int]:
-    """Read the PID from the lock file (best-effort)."""
+    """Read the PID of the running instance (best-effort)."""
     try:
-        text = _LOCK_PATH.read_text().strip()
+        text = _PID_PATH.read_text(encoding="ascii").strip()
         return int(text) if text else None
     except (OSError, ValueError):
         return None
@@ -120,23 +107,21 @@ def _release_instance_lock() -> None:
         try:
             _lock_file_handle.seek(0)
             _unlock_file(_lock_file_handle)
-        except (OSError, IOError):
+        except OSError:
             pass
         _lock_file_handle.close()
         _lock_file_handle = None
-    try:
-        _LOCK_PATH.unlink(missing_ok=True)
-    except OSError:
-        pass
+    for path in (_LOCK_PATH, _PID_PATH):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
-
-# ---------------------------------------------------------------------------
-# Port utilities
-# ---------------------------------------------------------------------------
 
 def _is_port_available(host: str, port: int) -> bool:
     """Check if a port is available for binding."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
     try:
         sock.bind((host, port))
         return True
@@ -146,102 +131,13 @@ def _is_port_available(host: str, port: int) -> bool:
         sock.close()
 
 
-def _get_port_owner_pid(port: int) -> Optional[int]:
-    """Return the PID listening on *port*, or None."""
-    try:
-        if _IS_WINDOWS:
-            result = _run_subprocess(["netstat", "-ano"])
-            lines = result.stdout.splitlines()
-            for line in lines:
-                if f":{port}" in line and "LISTENING" in line:
-                    parts = line.split()
-                    if parts:
-                        return int(parts[-1])
-        else:
-            result = _run_subprocess(["lsof", "-ti", f"tcp:{port}"])
-            for line in result.stdout.splitlines():
-                line = line.strip()
-                if line:
-                    return int(line)
-    except Exception:
-        pass
-    return None
-
-
-def _is_own_server_process(pid: int) -> bool:
-    """Check if *pid* is a Python process running this same server script."""
-    try:
-        cmdline = _get_process_command(pid).lower()
-        return "python" in cmdline and "mcp_server_http" in cmdline
-    except Exception:
-        return False
-
-
-def _kill_old_server(pid: int) -> bool:
-    """Kill process *pid* and wait up to 5s for it to die. Returns True if killed."""
-    import signal
-    log.warning("Killing old server process PID %d ...", pid)
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError:
-        if _IS_WINDOWS:
-            # process already dead or access denied — try taskkill as fallback
-            try:
-                _run_subprocess(["taskkill", "/F", "/PID", str(pid)])
-            except Exception as exc:
-                log.error("Failed to kill PID %d: %s", pid, exc)
-                return False
-        else:
-            return False
-
-    # Wait for process to actually exit
-    for _ in range(10):
-        time.sleep(0.5)
-        try:
-            os.kill(pid, 0)  # 0 = just check if alive
-        except OSError:
-            log.info("Old server PID %d terminated.", pid)
-            return True
-    log.error("PID %d did not die within 5 seconds.", pid)
-    return False
-
-
 def _ensure_port_free(host: str, port: int) -> None:
-    """Make sure *port* is free. If occupied by a previous instance of this
-    server, kill it automatically. Raises RuntimeError otherwise."""
+    """Raise RuntimeError if *port* is busy. Never kills the owning process."""
     if _is_port_available(host, port):
         return
-
-    owner_pid = _get_port_owner_pid(port)
-    if owner_pid is None:
-        raise RuntimeError(
-            f"Port {port} is busy but cannot identify the owning process. "
-            f"Check manually: {_manual_port_check_hint(port)}"
-        )
-
-    # Safety: only kill if it's our own old server
-    if not _is_own_server_process(owner_pid):
-        raise RuntimeError(
-            f"Port {port} is occupied by PID {owner_pid} which is NOT "
-            f"an mcp_server_http process. Will not kill it. "
-            f"Free the port manually or set MCP_PORT to a different value."
-        )
-
-    if not _kill_old_server(owner_pid):
-        raise RuntimeError(
-            f"Could not kill old server PID {owner_pid}. "
-            f"Kill it manually: {_manual_kill_hint(owner_pid)}"
-        )
-
-    # Wait a bit more for the port to be fully released
-    for _ in range(6):
-        if _is_port_available(host, port):
-            return
-        time.sleep(0.5)
-
     raise RuntimeError(
-        f"Port {port} still busy after killing PID {owner_pid}. "
-        f"It may be in TIME_WAIT state — wait 30s or use a different port."
+        f"Port {port} is already in use. Stop the process listening on it "
+        f"({_manual_port_check_hint(port)}) or set MCP_PORT to a different value."
     )
 
 
@@ -269,47 +165,45 @@ def _unlock_file(file_obj) -> None:
     fcntl.flock(file_obj.fileno(), fcntl.LOCK_UN)
 
 
-def _run_subprocess(command: list[str]):
-    import subprocess
-
-    return subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
-    )
-
-
-def _get_process_command(pid: int) -> str:
-    if _IS_WINDOWS:
-        result = _run_subprocess(
-            [
-                "wmic",
-                "process",
-                "where",
-                f"ProcessId={pid}",
-                "get",
-                "CommandLine",
-                "/format:list",
-            ]
-        )
-        return result.stdout
-
-    result = _run_subprocess(["ps", "-p", str(pid), "-o", "command="])
-    return result.stdout
-
-
 def _manual_port_check_hint(port: int) -> str:
     if _IS_WINDOWS:
         return f"Get-NetTCPConnection -LocalPort {port}"
     return f"lsof -i tcp:{port}"
 
 
-def _manual_kill_hint(pid: int) -> str:
-    if _IS_WINDOWS:
-        return f"taskkill /F /PID {pid}"
-    return f"kill -TERM {pid}"
+def _is_loopback_host(host: str) -> bool:
+    normalized = _normalize_host(host)
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _resolve_auth_token() -> Optional[str]:
+    token = str(os.getenv("MCP_AUTH_TOKEN", "")).strip()
+    return token or None
+
+
+def _validate_bind_security(host: str, auth_token: Optional[str]) -> None:
+    if _is_loopback_host(host) or auth_token:
+        return
+    raise RuntimeError(
+        f"Refusing to bind to non-loopback address {host!r} without authentication. "
+        "Set MCP_AUTH_TOKEN or bind to 127.0.0.1."
+    )
+
+
+def _is_authorized(authorization_header: Optional[str], auth_token: Optional[str]) -> bool:
+    if not auth_token:
+        return True
+    if not authorization_header:
+        return False
+    scheme, _, credentials = authorization_header.strip().partition(" ")
+    if scheme.lower() != "bearer":
+        return False
+    return hmac.compare_digest(credentials.strip().encode("utf-8"), auth_token.encode("utf-8"))
 
 
 def _parse_non_negative_int_env(name: str, default: int) -> int:
@@ -539,7 +433,10 @@ def _wrap_raw_rpc_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _validate_raw_rag_context_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    schema_properties = tool_rag_context()["inputSchema"]["properties"]
+    schema_properties = {
+        **_DEPRECATED_CLIENT_ARGUMENTS,
+        **tool_rag_context()["inputSchema"]["properties"],
+    }
     unknown_keys = sorted(set(arguments) - set(schema_properties))
     if unknown_keys:
         raise ValueError(
@@ -604,22 +501,16 @@ async def _read_json_body(request: web.Request, max_bytes: int) -> Any:
         raise ValueError("Invalid JSON") from exc
 
 
-async def run_http_server(
+def build_app(
     handler: MCPHandler,
-    host: str = "127.0.0.1",
-    port: int = 8765,
     *,
     sse_enabled: bool = False,
     allowed_hosts: Optional[list[str]] = None,
     allowed_origins: Optional[list[str]] = None,
-):
-    """Run HTTP server with SSE endpoint for MCP."""
-    try:
-        from aiohttp import web
-    except ImportError:
-        print("[ERROR] aiohttp not installed. Run: pip install aiohttp")
-        sys.exit(1)
-
+    auth_token: Optional[str] = None,
+    max_request_bytes: Optional[int] = None,
+) -> web.Application:
+    """Build the aiohttp application exposing the MCP transports."""
     if allowed_hosts is None:
         allowed_hosts = ["localhost", "127.0.0.1", "::1"]
     if allowed_origins is None:
@@ -629,16 +520,25 @@ async def run_http_server(
             "https://localhost:*",
             "https://127.0.0.1:*",
         ]
-    max_request_bytes = _parse_non_negative_int_env(
-        "LLM_CONTEXT_MAX_REQUEST_BYTES",
-        _DEFAULT_MAX_REQUEST_BYTES,
-    )
+    if max_request_bytes is None:
+        max_request_bytes = _parse_non_negative_int_env(
+            "LLM_CONTEXT_MAX_REQUEST_BYTES",
+            _DEFAULT_MAX_REQUEST_BYTES,
+        )
 
-    # Store active SSE connections
     sessions: dict[str, asyncio.Queue] = {}
+
+    async def dispatch(body: Any) -> Optional[dict[str, Any]]:
+        return await asyncio.to_thread(handler.handle_message, body)
 
     @web.middleware
     async def transport_security_middleware(request: web.Request, handler):
+        if not _is_authorized(request.headers.get("Authorization"), auth_token):
+            return web.json_response(
+                _jsonrpc_transport_error("Unauthorized"),
+                status=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         if request.path != "/health":
             host_header = request.headers.get("Host")
             if not _is_host_allowed(host_header, allowed_hosts):
@@ -678,7 +578,6 @@ async def run_http_server(
         )
         await response.prepare(request)
 
-        # Send endpoint info
         endpoint_url = f"{request.scheme}://{request.host}/message?session_id={session_id}"
         await response.write(f"event: endpoint\ndata: {endpoint_url}\n\n".encode())
 
@@ -686,9 +585,9 @@ async def run_http_server(
             while True:
                 try:
                     msg = await asyncio.wait_for(queue.get(), timeout=30.0)
-                    await response.write(f"event: message\ndata: {json.dumps(msg)}\n\n".encode())
+                    data = json.dumps(msg, cls=UUIDEncoder)
+                    await response.write(f"event: message\ndata: {data}\n\n".encode())
                 except asyncio.TimeoutError:
-                    # Send keepalive
                     await response.write(b": keepalive\n\n")
         except (asyncio.CancelledError, ConnectionResetError):
             pass
@@ -698,7 +597,7 @@ async def run_http_server(
         return response
 
     async def handle_message(request: web.Request) -> web.Response:
-        """Handle incoming JSON-RPC messages."""
+        """Handle incoming JSON-RPC messages for an SSE session."""
         session_id = request.query.get("session_id")
         if not session_id or session_id not in sessions:
             return web.json_response({"error": "Invalid session"}, status=400)
@@ -708,43 +607,36 @@ async def run_http_server(
         except ValueError:
             return web.json_response({"error": "Invalid JSON"}, status=400)
 
-        # Process message
-        response = handler.handle_message(body)
-        if response is not None:
-            await sessions[session_id].put(response)
+        response = await dispatch(body)
+        queue = sessions.get(session_id)
+        if response is not None and queue is not None:
+            await queue.put(response)
 
         return web.Response(status=202, text="Accepted")
 
     async def handle_health(request: web.Request) -> web.Response:
         """Health check endpoint."""
-        return web.json_response(_build_health_payload(handler))
+        payload = await asyncio.to_thread(_build_health_payload, handler)
+        return web.json_response(payload, dumps=lambda obj: json.dumps(obj, cls=UUIDEncoder))
 
     async def handle_rpc(request: web.Request) -> web.Response:
         """Handle synchronous JSON-RPC messages (no SSE)."""
         try:
             body = await _read_json_body(request, max_request_bytes)
             body = _coerce_rpc_message(body)
-            print(f"[RPC] Received: {json.dumps(body)}")
         except ValueError as e:
-            print(f"[RPC] JSON parse error: {e}")
+            log.debug("Rejected /rpc request: %s", e)
             status = 413 if "too large" in str(e).lower() else 400
             return web.json_response({"error": str(e)}, status=status)
 
-        # Process message synchronously
-        response = handler.handle_message(body)
-        print(f"[RPC] Response type: {type(response)}, is None: {response is None}")
-        
-        # If response is None (e.g. notifications), return empty success
+        log.debug("/rpc method=%s id=%s", body.get("method"), body.get("id"))
+        response = await dispatch(body)
         if response is None:
-            return web.Response(status=204) # No Content
-            
-        # Return the response as JSON (already serializable with UUIDEncoder)
+            return web.Response(status=204)
+
         result_json = json.dumps(response, cls=UUIDEncoder)
-        print(f"[RPC] Sending response ({len(result_json)} bytes)")
-        return web.Response(
-            text=result_json,
-            content_type='application/json'
-        )
+        log.debug("/rpc response bytes=%d", len(result_json))
+        return web.Response(text=result_json, content_type="application/json")
 
     async def handle_streamable(request: web.Request) -> web.Response:
         """Handle streamable HTTP JSON-RPC requests (POST)."""
@@ -769,7 +661,7 @@ async def run_http_server(
                 status=400,
             )
 
-        response = handler.handle_message(body)
+        response = await dispatch(body)
         if response is None:
             return web.Response(status=202, text="Accepted")
 
@@ -782,7 +674,7 @@ async def run_http_server(
         """Handle streamable HTTP session close requests (DELETE)."""
         return web.Response(status=200, text="OK")
 
-    async def handle_mcp_get(request: web.Request) -> web.StreamResponse | web.Response:
+    async def handle_mcp_get(request: web.Request) -> web.StreamResponse:
         """GET /mcp is either SSE (optional) or 405 (spec-compliant fallback)."""
         if sse_enabled:
             return await handle_sse(request)
@@ -791,14 +683,35 @@ async def run_http_server(
     app = web.Application(middlewares=[transport_security_middleware])
     app.router.add_get("/sse", handle_sse)
     app.router.add_post("/message", handle_message)
-    app.router.add_post("/sse", handle_streamable)  # compatibility for http-first on /sse
+    app.router.add_post("/sse", handle_streamable)
     app.router.add_delete("/sse", handle_streamable_delete)
     app.router.add_get("/mcp", handle_mcp_get)
     app.router.add_post("/mcp", handle_streamable)
     app.router.add_delete("/mcp", handle_streamable_delete)
-    app.router.add_post("/rpc", handle_rpc)  # New synchronous endpoint
+    app.router.add_post("/rpc", handle_rpc)
     app.router.add_get("/health", handle_health)
+    return app
 
+
+async def run_http_server(
+    handler: MCPHandler,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    *,
+    sse_enabled: bool = False,
+    allowed_hosts: Optional[list[str]] = None,
+    allowed_origins: Optional[list[str]] = None,
+    auth_token: Optional[str] = None,
+):
+    """Run the HTTP server until cancelled."""
+    _validate_bind_security(host, auth_token)
+    app = build_app(
+        handler,
+        sse_enabled=sse_enabled,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+        auth_token=auth_token,
+    )
     runner = web.AppRunner(app)
     await runner.setup()
 
@@ -807,8 +720,7 @@ async def run_http_server(
         await site.start()
     except OSError as exc:
         log.error(
-            "Failed to bind %s:%d — %s. "
-            "Check with: %s",
+            "Failed to bind %s:%d (%s). Check with: %s",
             host,
             port,
             exc,
@@ -820,9 +732,9 @@ async def run_http_server(
     log.info("MCP HTTP server running at http://%s:%d/mcp", host, port)
     log.info("MCP SSE legacy endpoint at http://%s:%d/sse", host, port)
     log.info("Health check: http://%s:%d/health", host, port)
+    log.info("Bearer authentication: %s", "enabled" if auth_token else "disabled")
     log.info("Press Ctrl+C to stop")
 
-    # Wait forever
     try:
         await asyncio.Event().wait()
     except asyncio.CancelledError:
@@ -838,17 +750,23 @@ def main():
     log.info("  LLM Context MCP Server (HTTP/SSE)")
     log.info("=" * 50)
 
-    # --- Single-instance guard ---
+    host = os.getenv("MCP_HOST", "127.0.0.1")
+    port = int(os.getenv("MCP_PORT", "8765"))
+    auth_token = _resolve_auth_token()
+    try:
+        _validate_bind_security(host, auth_token)
+    except RuntimeError as exc:
+        log.error("%s", exc)
+        sys.exit(1)
+
     if not _acquire_instance_lock():
         log.error(
-            "Another instance is already running (lock file: %s). "
-            "Kill it first or delete the lock file if stale.", _LOCK_PATH
+            "Another instance is already running (PID %s, lock file: %s). Stop it first.",
+            _read_lock_pid() or "unknown",
+            _LOCK_PATH,
         )
         sys.exit(1)
 
-    # --- Resolve host/port from env ---
-    host = os.getenv("MCP_HOST", "127.0.0.1")
-    port = int(os.getenv("MCP_PORT", "8765"))
     sse_enabled = _parse_bool_env(os.getenv("MCP_SSE_ENABLED"), False)
     allowed_hosts = _parse_csv_env(
         os.getenv("MCP_ALLOWED_HOSTS"),
@@ -900,6 +818,7 @@ def main():
                 sse_enabled=sse_enabled,
                 allowed_hosts=allowed_hosts,
                 allowed_origins=allowed_origins,
+                auth_token=auth_token,
             )
         )
     except KeyboardInterrupt:

@@ -1,17 +1,17 @@
 [
   {
-    "query": "esporta presenze teamsystem",
-    "expected_paths": ["librerie\\BpoFH\\PersonaleExport.cs"],
+    "query": "load project registry and runtime state",
+    "expected_paths": ["rag_indexer/project_registry.py"],
     "top_k": 8
   },
   {
-    "query": "menu permessi",
-    "expected_paths": ["pubblico\\api\\Controllers\\menu.cs"],
+    "query": "split markdown into chunks by heading",
+    "expected_paths": ["rag_indexer/chunking.py"],
     "top_k": 8
   },
   {
-    "query": "registrazione contabile fiscobot",
-    "expected_paths": ["librerie\\Fiscobot\\RegistrazioneContabile.cs"],
+    "query": "hybrid vector and keyword retrieval scoring",
+    "expected_paths": ["rag_indexer/retrieval.py"],
     "top_k": 8
   }
 ]

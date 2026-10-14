@@ -6,6 +6,8 @@ from typing import Iterable, Optional, Tuple
 import fnmatch
 import os
 
+from .path_utils import to_posix
+
 
 SOURCE_TYPE_MAP = {
     ".md": "md",
@@ -31,8 +33,8 @@ def scan_files(
     exclude_globs: Optional[list[str]] = None,
     never_index_ext: Optional[list[str]] = None,
     assets_template_only: bool = False,
-    assets_root_dir: str = "pubblico/assets",
-    assets_template_dir: str = "pubblico/assets/template",
+    assets_root_dir: str = "",
+    assets_template_dir: str = "",
 ) -> Iterable[Path]:
     root = root.resolve()
     for dirpath, dirnames, filenames in os.walk(root):
@@ -143,7 +145,7 @@ def _relative_posix(path: Path, root: Path) -> str:
         rel = path.resolve().relative_to(root.resolve())
     except ValueError:
         rel = path
-    return rel.as_posix().lstrip("./")
+    return to_posix(rel.as_posix())
 
 
 def _is_included_path(rel_path: str, include_dirs: list[str]) -> bool:

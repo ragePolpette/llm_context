@@ -31,7 +31,7 @@ def retrieve_v2(
     model_id = _embedder_id(embedder)
     candidate_k = max(top_k * 4, top_k)
     if path_prefix:
-        path_prefix = path_prefix.replace("/", "\\").lower()
+        path_prefix = path_prefix.replace("\\", "/").lower()
 
     vector_hits = store.query_vector(
         embedding=embedding,

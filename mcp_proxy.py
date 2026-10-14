@@ -4,12 +4,20 @@ import urllib.request
 import urllib.error
 import os
 
-SERVER_URL = "http://127.0.0.1:8765/rpc"
+SERVER_URL = os.getenv("LLM_CONTEXT_PROXY_URL", "http://127.0.0.1:8765/rpc")
 
 def log(msg):
     # Log to stderr so it doesn't interfere with MCP stdio
     sys.stderr.write(f"[PROXY] {msg}\n")
     sys.stderr.flush()
+
+def _request_headers():
+    headers = {"Content-Type": "application/json"}
+    token = os.getenv("MCP_AUTH_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
 
 def main():
     log("Started MCP Proxy")
@@ -35,7 +43,7 @@ def main():
                 req = urllib.request.Request(
                     SERVER_URL,
                     data=json.dumps(message).encode('utf-8'),
-                    headers={'Content-Type': 'application/json'}
+                    headers=_request_headers()
                 )
                 with urllib.request.urlopen(req) as resp:
                     if resp.status == 204:

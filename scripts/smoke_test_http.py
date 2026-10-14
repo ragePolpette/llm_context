@@ -15,6 +15,9 @@ from typing import Any
 def _http_json(url: str, *, method: str = "GET", payload: dict[str, Any] | None = None) -> dict[str, Any]:
     data = None
     headers = {"Accept": "application/json"}
+    token = os.getenv("MCP_AUTH_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -50,7 +53,7 @@ def _wait_for_health(base_url: str, *, timeout_sec: float) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Smoke test del runtime HTTP canonico di llm-context")
+    parser = argparse.ArgumentParser(description="Smoke test for the llm-context HTTP runtime")
     parser.add_argument("--config-path", default="config.rework.yaml")
     parser.add_argument("--dsn", default=None)
     parser.add_argument("--runtime-name", default=None)
@@ -77,7 +80,7 @@ def main() -> int:
         env["MCP_PORT"] = str(args.port)
     if not env.get("LLM_CONTEXT_DSN"):
         raise RuntimeError(
-            "LLM_CONTEXT_DSN non impostato. Passalo al processo oppure usa --dsn nello smoke test."
+            "LLM_CONTEXT_DSN is not set. Export it or pass --dsn to the smoke test."
         )
 
     host = env.get("MCP_HOST", "127.0.0.1")

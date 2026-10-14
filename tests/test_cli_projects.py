@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-import cli
+from rag_indexer import cli
 
 
 def _write_cli_config(
@@ -110,7 +110,7 @@ def test_run_ingest_command_allows_registered_repo_root_project(monkeypatch, tmp
             return None
 
     class FakeStore:
-        def __init__(self, conn, embedding_dim):
+        def __init__(self, conn, embedding_dim, fts_config="simple"):
             self.embedding_dim = embedding_dim
 
         def get_repo_stats(self, repo_id):
@@ -142,8 +142,6 @@ def test_run_ingest_command_allows_registered_repo_root_project(monkeypatch, tmp
         dsn="postgresql://ctx",
         embedder="dummy",
         embedding_dim=None,
-        gemini_api_key=None,
-        gemini_model="text-embedding-004",
         local_model="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
         root=None,
         include=None,
@@ -179,7 +177,7 @@ def test_run_ingest_command_updates_project_runtime_state(monkeypatch, tmp_path)
             return None
 
     class FakeStore:
-        def __init__(self, conn, embedding_dim):
+        def __init__(self, conn, embedding_dim, fts_config="simple"):
             self.embedding_dim = embedding_dim
 
         def get_repo_stats(self, repo_id):
@@ -211,8 +209,6 @@ def test_run_ingest_command_updates_project_runtime_state(monkeypatch, tmp_path)
         dsn="postgresql://ctx",
         embedder="dummy",
         embedding_dim=None,
-        gemini_api_key=None,
-        gemini_model="text-embedding-004",
         local_model="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
         root=None,
         include=None,
@@ -246,3 +242,46 @@ def test_run_ingest_command_updates_project_runtime_state(monkeypatch, tmp_path)
     assert reloaded.index_manifest.indexed_chunks == 8
     assert reloaded.index_manifest.indexed_symbols == 2
 
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["serve"], ("stdio", [])),
+        (["serve", "--legacy-content-length"], ("stdio", ["--legacy-content-length"])),
+        (["serve", "--transport", "http"], ("http", None)),
+    ],
+)
+def test_serve_dispatches_to_transport(monkeypatch, argv, expected):
+    import sys
+    import types
+
+    calls = []
+    monkeypatch.setitem(
+        sys.modules,
+        "mcp_server",
+        types.SimpleNamespace(main=lambda args=None: calls.append(("stdio", args))),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "mcp_server_http",
+        types.SimpleNamespace(main=lambda: calls.append(("http", None))),
+    )
+
+    cli.main(argv)
+
+    assert calls == [expected]
+
+
+def test_serve_exports_config_path(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    monkeypatch.delenv("LLM_CONTEXT_CONFIG_PATH", raising=False)
+    monkeypatch.setitem(sys.modules, "mcp_server", types.SimpleNamespace(main=lambda args=None: None))
+    config_path = tmp_path / "custom.yaml"
+
+    cli.main(["--config", str(config_path), "serve"])
+
+    assert cli.os.environ["LLM_CONTEXT_CONFIG_PATH"] == str(config_path.resolve())
+    monkeypatch.delenv("LLM_CONTEXT_CONFIG_PATH", raising=False)

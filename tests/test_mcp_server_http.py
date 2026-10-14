@@ -1,8 +1,10 @@
+import asyncio
 import threading
-import types
+import time
 from logging.handlers import RotatingFileHandler
 
 import pytest
+from aiohttp.test_utils import TestClient, TestServer
 
 import mcp_server_http
 from mcp_server_http import _coerce_rpc_message
@@ -70,56 +72,6 @@ def test_tools_call_rag_context_rejects_unknown_arguments():
                 },
             }
         )
-
-
-def test_non_windows_port_owner_lookup_uses_lsof(monkeypatch):
-    calls = []
-
-    def fake_run_subprocess(command):
-        calls.append(command)
-        return types.SimpleNamespace(stdout="4321\n")
-
-    monkeypatch.setattr(mcp_server_http, "_IS_WINDOWS", False)
-    monkeypatch.setattr(mcp_server_http, "_run_subprocess", fake_run_subprocess)
-
-    assert mcp_server_http._get_port_owner_pid(8765) == 4321
-    assert calls == [["lsof", "-ti", "tcp:8765"]]
-
-
-def test_non_windows_process_lookup_uses_ps(monkeypatch):
-    calls = []
-
-    def fake_run_subprocess(command):
-        calls.append(command)
-        return types.SimpleNamespace(stdout="python mcp_server_http.py")
-
-    monkeypatch.setattr(mcp_server_http, "_IS_WINDOWS", False)
-    monkeypatch.setattr(mcp_server_http, "_run_subprocess", fake_run_subprocess)
-
-    assert mcp_server_http._is_own_server_process(321) is True
-    assert calls == [["ps", "-p", "321", "-o", "command="]]
-
-
-def test_non_windows_kill_does_not_call_taskkill(monkeypatch):
-    calls = []
-    attempts = {"count": 0}
-
-    def fake_run_subprocess(command):
-        calls.append(command)
-        return types.SimpleNamespace(stdout="")
-
-    def fake_kill(pid, signal_number):
-        attempts["count"] += 1
-        if attempts["count"] == 1:
-            return None
-        raise OSError("process exited")
-
-    monkeypatch.setattr(mcp_server_http, "_IS_WINDOWS", False)
-    monkeypatch.setattr(mcp_server_http, "_run_subprocess", fake_run_subprocess)
-    monkeypatch.setattr(mcp_server_http.os, "kill", fake_kill)
-
-    assert mcp_server_http._kill_old_server(555) is True
-    assert calls == []
 
 
 def test_configure_http_logging_uses_rotating_file_handler(monkeypatch, tmp_path):
@@ -232,3 +184,147 @@ def test_resolve_runtime_config_path_returns_none_when_not_set(monkeypatch):
 
     assert mcp_server_http._resolve_runtime_config_path() is None
 
+
+
+class _SlowHandler:
+    def __init__(self, delay=0.4):
+        self.delay = delay
+        self.threads = []
+        self._ready = threading.Event()
+        self._ready.set()
+        self._query_cache_lock = threading.Lock()
+        self._query_cache = {}
+        self._query_cache_max = 1
+        self._query_cache_ttl = 1
+
+    def handle_message(self, message):
+        self.threads.append(threading.current_thread())
+        time.sleep(self.delay)
+        return {"jsonrpc": "2.0", "id": message.get("id"), "result": {"ok": True}}
+
+    def get_operational_status(self, *, ready):
+        self.threads.append(threading.current_thread())
+        return {"status": "ready"}
+
+
+async def _client_for(app):
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    return client
+
+
+@pytest.mark.asyncio
+async def test_concurrent_requests_do_not_block_event_loop():
+    handler = _SlowHandler(delay=0.4)
+    client = await _client_for(mcp_server_http.build_app(handler))
+    try:
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        started = time.monotonic()
+        responses = await asyncio.gather(
+            client.post("/mcp", json=body),
+            client.post("/rpc", json=body),
+        )
+        elapsed = time.monotonic() - started
+        assert [response.status for response in responses] == [200, 200]
+    finally:
+        await client.close()
+
+    assert elapsed < 0.75
+    assert all(thread is not threading.main_thread() for thread in handler.threads)
+
+
+@pytest.mark.asyncio
+async def test_health_runs_status_probe_off_the_event_loop():
+    handler = _SlowHandler()
+    client = await _client_for(mcp_server_http.build_app(handler))
+    try:
+        response = await client.get("/health")
+        assert response.status == 200
+    finally:
+        await client.close()
+
+    assert handler.threads and handler.threads[0] is not threading.main_thread()
+
+
+@pytest.mark.asyncio
+async def test_bearer_token_is_required_when_configured():
+    handler = _SlowHandler(delay=0)
+    app = mcp_server_http.build_app(handler, auth_token="s3cret")
+    client = await _client_for(app)
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    try:
+        missing = await client.post("/mcp", json=body)
+        wrong = await client.post("/mcp", json=body, headers={"Authorization": "Bearer nope"})
+        health = await client.get("/health")
+        ok = await client.post("/mcp", json=body, headers={"Authorization": "Bearer s3cret"})
+        assert missing.status == 401
+        assert missing.headers["WWW-Authenticate"] == "Bearer"
+        assert wrong.status == 401
+        assert health.status == 401
+        assert ok.status == 200
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_no_token_configured_keeps_local_access_open():
+    client = await _client_for(mcp_server_http.build_app(_SlowHandler(delay=0)))
+    try:
+        response = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        assert response.status == 200
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.10", "example.com"])
+def test_non_loopback_bind_requires_token(host):
+    with pytest.raises(RuntimeError, match="MCP_AUTH_TOKEN"):
+        mcp_server_http._validate_bind_security(host, None)
+    mcp_server_http._validate_bind_security(host, "token")
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "[::1]", "127.0.0.2"])
+def test_loopback_bind_does_not_require_token(host):
+    mcp_server_http._validate_bind_security(host, None)
+
+
+def test_resolve_auth_token_reads_env(monkeypatch):
+    monkeypatch.setenv("MCP_AUTH_TOKEN", "  abc  ")
+    assert mcp_server_http._resolve_auth_token() == "abc"
+    monkeypatch.setenv("MCP_AUTH_TOKEN", "")
+    assert mcp_server_http._resolve_auth_token() is None
+
+
+def test_instance_lock_held_elsewhere_is_not_killed(monkeypatch, tmp_path):
+    lock_path = tmp_path / ".mcp_server.lock"
+    pid_path = tmp_path / ".mcp_server.pid"
+    monkeypatch.setattr(mcp_server_http, "_LOCK_PATH", lock_path)
+    monkeypatch.setattr(mcp_server_http, "_PID_PATH", pid_path)
+    killed = []
+    monkeypatch.setattr(mcp_server_http.os, "kill", lambda *args: killed.append(args))
+
+    with open(lock_path, "a+") as holder:
+        mcp_server_http._lock_file(holder)
+        try:
+            assert mcp_server_http._acquire_instance_lock() is False
+        finally:
+            mcp_server_http._unlock_file(holder)
+
+    assert killed == []
+    assert mcp_server_http._acquire_instance_lock() is True
+    assert mcp_server_http._read_lock_pid() == mcp_server_http.os.getpid()
+    mcp_server_http._release_instance_lock()
+    assert not lock_path.exists()
+    assert not pid_path.exists()
+
+
+def test_ensure_port_free_never_kills(monkeypatch):
+    monkeypatch.setattr(mcp_server_http, "_is_port_available", lambda host, port: False)
+    with pytest.raises(RuntimeError, match="already in use"):
+        mcp_server_http._ensure_port_free("127.0.0.1", 8765)
+
+
+def test_raw_rpc_forwards_deprecated_embedder_arguments_to_handler():
+    message = _coerce_rpc_message({"query_text": "q", "embedder": "local-st"})
+
+    assert message["params"]["arguments"]["embedder"] == "local-st"
