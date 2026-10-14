@@ -73,3 +73,8 @@ AGENTS.md
 AGENT_GUIDE.md
 *_FOLLOWUP.md
 REFACTORING_SESSION_*.md
+
+# Local runtime state and registry (see README, Configuration)
+projects.yaml
+projects.state.json
+project_manifests/

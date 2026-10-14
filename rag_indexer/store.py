@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 import uuid
 
 import psycopg
@@ -78,17 +79,58 @@ class EmbeddingRecord:
     embedding_id: uuid.UUID = field(default_factory=uuid.uuid4)
 
 
+DEFAULT_FTS_CONFIG = "simple"
+_PATH_NORM_POSIX_SQL = "replace(d.path_norm, '\\', '/')"
+
+
 class RagStore:
-    def __init__(self, conn: psycopg.Connection, embedding_dim: int) -> None:
+    def __init__(
+        self,
+        conn: psycopg.Connection,
+        embedding_dim: int,
+        fts_config: str = DEFAULT_FTS_CONFIG,
+    ) -> None:
         self.conn = conn
         self.embedding_dim = int(embedding_dim)
+        self.fts_config = fts_config or DEFAULT_FTS_CONFIG
+        self._in_atomic = False
+
+    def _commit(self) -> None:
+        if not self._in_atomic:
+            self.conn.commit()
+
+    @contextmanager
+    def atomic(self) -> Iterator[None]:
+        """Group several write methods into a single transaction (commit once, rollback on error)."""
+        if self._in_atomic:
+            yield
+            return
+        self._in_atomic = True
+        try:
+            yield
+        except BaseException:
+            self._in_atomic = False
+            self.conn.rollback()
+            raise
+        self._in_atomic = False
+        self.conn.commit()
+
+    def delete_documents(self, repo_id: str, doc_ids: list[uuid.UUID]) -> int:
+        if not doc_ids:
+            return 0
+        sql_text = "DELETE FROM documents WHERE repo_id = @Valore0 AND doc_id = ANY(@Valore1)"
+        with self.conn.cursor() as cur:
+            execute_params(cur, sql_text, [repo_id, list(doc_ids)])
+            deleted = cur.rowcount or 0
+        self._commit()
+        return deleted
 
     def delete_repo(self, repo_id: str) -> int:
         sql_text = "DELETE FROM documents WHERE repo_id = @Valore0"
         with self.conn.cursor() as cur:
             execute_params(cur, sql_text, [repo_id])
             deleted = cur.rowcount or 0
-        self.conn.commit()
+        self._commit()
         return deleted
 
     def get_document(self, repo_id: str, path_norm: str) -> Optional[dict[str, Any]]:
@@ -188,7 +230,7 @@ class RagStore:
                 ],
             )
             row = cur.fetchone()
-        self.conn.commit()
+        self._commit()
         return row[0]
 
     def mark_documents_deleted(self, repo_id: str, doc_ids: list[uuid.UUID]) -> int:
@@ -201,7 +243,7 @@ class RagStore:
         with self.conn.cursor() as cur:
             execute_params(cur, sql_text, [repo_id, doc_ids])
             updated = cur.rowcount or 0
-        self.conn.commit()
+        self._commit()
         return updated
 
     def delete_chunks(self, doc_id: uuid.UUID) -> int:
@@ -209,7 +251,7 @@ class RagStore:
         with self.conn.cursor() as cur:
             execute_params(cur, sql_text, [doc_id])
             deleted = cur.rowcount or 0
-        self.conn.commit()
+        self._commit()
         return deleted
 
     def insert_chunks_and_embeddings(
@@ -227,7 +269,7 @@ class RagStore:
             ") VALUES ("
             "@Valore0, @Valore1, @Valore2, @Valore3, @Valore4, @Valore5, @Valore6, "
             "@Valore7, @Valore8, @Valore9, @Valore10, @Valore11, @Valore12, "
-            "to_tsvector('italian_unaccent', @Valore13)"
+            "to_tsvector(@Valore13::regconfig, @Valore14)"
             ")"
         )
         embedding_sql = (
@@ -256,6 +298,7 @@ class RagStore:
                         chunk.token_count,
                         Json(chunk.quality_flags or {}),
                         chunk.is_header,
+                        self.fts_config,
                         chunk.text,
                     ]
                 )
@@ -284,7 +327,7 @@ class RagStore:
                     embed_batch = []
             if embed_batch:
                 execute_many_params(cur, embedding_sql, embed_batch)
-        self.conn.commit()
+        self._commit()
         return total
 
     def query_vector(
@@ -319,7 +362,7 @@ class RagStore:
 
         if path_prefix:
             path_placeholder = add_param(f"{_escape_like_value(path_prefix)}%")
-            conditions.append(f"d.path_norm LIKE {path_placeholder} ESCAPE '\\'")
+            conditions.append(f"{_PATH_NORM_POSIX_SQL} LIKE {path_placeholder} ESCAPE '\\'")
         if doc_type:
             doc_placeholder = add_param(doc_type)
             conditions.append(f"d.doc_type = {doc_placeholder}")
@@ -383,6 +426,7 @@ class RagStore:
             params.append(value)
             return placeholder
 
+        fts_placeholder = add_param(self.fts_config)
         query_placeholder = add_param(query_text)
         repo_placeholder = add_param(repo_id)
         rank_placeholder = add_param(query_text)
@@ -390,12 +434,12 @@ class RagStore:
         conditions = [
             f"d.repo_id = {repo_placeholder}",
             "d.deleted_at IS NULL",
-            f"c.search_tsv @@ plainto_tsquery('italian_unaccent', {query_placeholder})",
+            f"c.search_tsv @@ plainto_tsquery({fts_placeholder}::regconfig, {query_placeholder})",
         ]
 
         if path_prefix:
             path_placeholder = add_param(f"{_escape_like_value(path_prefix)}%")
-            conditions.append(f"d.path_norm LIKE {path_placeholder} ESCAPE '\\'")
+            conditions.append(f"{_PATH_NORM_POSIX_SQL} LIKE {path_placeholder} ESCAPE '\\'")
         if doc_type:
             doc_placeholder = add_param(doc_type)
             conditions.append(f"d.doc_type = {doc_placeholder}")
@@ -409,7 +453,7 @@ class RagStore:
             "SELECT c.chunk_id, d.doc_id, d.path, d.path_norm, c.chunk_index, "
             "c.text, c.text_hash, c.line_start, c.line_end, c.char_start, c.char_end, "
             "c.section_path, c.is_header, "
-            f"ts_rank_cd(c.search_tsv, plainto_tsquery('italian_unaccent', {rank_placeholder})) AS rank "
+            f"ts_rank_cd(c.search_tsv, plainto_tsquery({fts_placeholder}::regconfig, {rank_placeholder})) AS rank "
             "FROM chunks c "
             "JOIN documents d ON d.doc_id = c.doc_id "
             "WHERE "
@@ -448,7 +492,7 @@ class RagStore:
         with self.conn.cursor() as cur:
             execute_params(cur, sql_text, [doc_id])
             deleted = cur.rowcount or 0
-        self.conn.commit()
+        self._commit()
         return deleted
 
     def insert_symbols(self, records: list[SymbolRecord]) -> int:
@@ -470,7 +514,7 @@ class RagStore:
         ]
         with self.conn.cursor() as cur:
             execute_many_params(cur, sql_text, rows)
-        self.conn.commit()
+        self._commit()
         return len(records)
 
     def query_symbols(
@@ -540,7 +584,7 @@ class RagStore:
         with self.conn.cursor() as cur:
             execute_params(cur, sql_text, [doc_id])
             deleted = cur.rowcount or 0
-        self.conn.commit()
+        self._commit()
         return deleted
 
     def insert_symbol_refs(self, records: list[SymbolRefRecord]) -> int:
@@ -559,7 +603,7 @@ class RagStore:
         ]
         with self.conn.cursor() as cur:
             execute_many_params(cur, sql_text, rows)
-        self.conn.commit()
+        self._commit()
         return len(records)
 
     def query_caller_sites(

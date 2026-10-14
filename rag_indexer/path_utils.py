@@ -11,13 +11,24 @@ from pathlib import Path
 from typing import Optional
 
 
-def normalize_path_prefix(value: Optional[str]) -> Optional[str]:
-    """Normalize a path prefix by converting slashes and applying aliases."""
+_LEADING_DOT_SLASH = re.compile(r"^(?:\./)+")
+
+
+def to_posix(value: str) -> str:
+    """Convert a path to forward slashes and drop leading "./" segments only."""
+    return _LEADING_DOT_SLASH.sub("", value.replace("\\", "/"))
+
+
+def normalize_path_prefix(
+    value: Optional[str],
+    path_aliases: Optional[dict[str, str]] = None,
+) -> Optional[str]:
+    """Normalize a path prefix to posix form and apply configured aliases."""
     if not value:
         return None
-    normalized = value.replace("/", "\\").lstrip(".\\")
-    normalized = apply_path_aliases(normalized)
-    return normalized
+    normalized = to_posix(value)
+    normalized = apply_path_aliases(normalized, path_aliases)
+    return normalized or None
 
 
 def resolve_path_prefix(
@@ -26,6 +37,7 @@ def resolve_path_prefix(
     query_text: Optional[str],
     auto_scope: bool,
     scope_map: dict[str, list[str]],
+    path_aliases: Optional[dict[str, str]] = None,
 ) -> Optional[str]:
     """
     Resolve path prefix from explicit prefix, file path, query text, or auto-scope.
@@ -37,18 +49,21 @@ def resolve_path_prefix(
     4. Auto-scoped prefix from query keywords
     """
     if path_prefix:
-        return normalize_path_prefix(path_prefix)
+        return normalize_path_prefix(path_prefix, path_aliases)
     if not file_path:
-        detected = path_prefix_from_text(query_text)
+        detected = path_prefix_from_text(query_text, path_aliases)
         if detected:
             return detected
-        return auto_scope_prefix(query_text, scope_map) if auto_scope else None
-    return path_prefix_from_file(file_path)
+        return auto_scope_prefix(query_text, scope_map, path_aliases) if auto_scope else None
+    return path_prefix_from_file(file_path, path_aliases)
 
 
-def path_prefix_from_file(file_path: str) -> Optional[str]:
+def path_prefix_from_file(
+    file_path: str,
+    path_aliases: Optional[dict[str, str]] = None,
+) -> Optional[str]:
     """Extract path prefix from a file path, converting to relative if absolute."""
-    normalized = normalize_path_prefix(file_path)
+    normalized = normalize_path_prefix(file_path, path_aliases)
     if not normalized:
         return None
     path_obj = Path(normalized)
@@ -57,15 +72,18 @@ def path_prefix_from_file(file_path: str) -> Optional[str]:
             path_obj = path_obj.resolve().relative_to(Path.cwd().resolve())
         except ValueError:
             path_obj = Path(normalized)
-    path_str = path_obj.as_posix().replace("/", "\\")
-    if path_str.endswith("\\"):
+    path_str = path_obj.as_posix()
+    if path_str.endswith("/"):
         return path_str
     if Path(path_str).suffix:
         return path_str
-    return path_str + "\\"
+    return path_str + "/"
 
 
-def path_prefix_from_text(text: Optional[str]) -> Optional[str]:
+def path_prefix_from_text(
+    text: Optional[str],
+    path_aliases: Optional[dict[str, str]] = None,
+) -> Optional[str]:
     """Extract path prefix from text by detecting file paths in query."""
     if not text:
         return None
@@ -77,24 +95,25 @@ def path_prefix_from_text(text: Optional[str]) -> Optional[str]:
     if not matches:
         return None
     best = max(matches, key=lambda match: len(match.group("path")))
-    return normalize_path_prefix(best.group("path"))
+    return normalize_path_prefix(best.group("path"), path_aliases)
 
 
-def apply_path_aliases(path: str) -> str:
-    """Apply project-specific path aliases/transformations."""
+def apply_path_aliases(path: str, path_aliases: Optional[dict[str, str]] = None) -> str:
+    """Rewrite path fragments using configured aliases (``{from: to}``, posix form)."""
+    if not path_aliases:
+        return path
     normalized = path
-    normalized = normalized.replace(
-        "pubblico\\assets\\pdf\\", "pubblico\\assets\\template\\pdf\\"
-    )
-    normalized = normalized.replace(
-        "pubblico\\assets\\pdf/", "pubblico\\assets\\template\\pdf/"
-    )
+    for source, target in path_aliases.items():
+        source_norm = to_posix(str(source))
+        if source_norm:
+            normalized = normalized.replace(source_norm, to_posix(str(target)))
     return normalized
 
 
 def auto_scope_prefix(
     query_text: Optional[str],
     scope_map: dict[str, list[str]],
+    path_aliases: Optional[dict[str, str]] = None,
 ) -> Optional[str]:
     """
     Auto-detect path prefix from query text using keyword mapping.
@@ -120,7 +139,7 @@ def auto_scope_prefix(
                     best_match = (prefix, key)
     if best_match is None:
         return None
-    return normalize_path_prefix(best_match[0])
+    return normalize_path_prefix(best_match[0], path_aliases)
 
 
 def parse_bool(value: str) -> bool:

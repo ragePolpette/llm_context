@@ -61,3 +61,51 @@ def test_execute_many_params_reorders_each_row():
     ]
 
 
+
+
+class _RecordingCursor:
+    def __init__(self, statements):
+        self.statements = statements
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, statement, *args):
+        self.statements.append(str(statement))
+
+
+class _RecordingConn:
+    def __init__(self):
+        self.statements = []
+
+    def cursor(self):
+        return _RecordingCursor(self.statements)
+
+    def commit(self):
+        pass
+
+
+def test_init_db_v2_does_not_require_italian_config_by_default(monkeypatch):
+    from rag_indexer import db as db_module
+
+    monkeypatch.setattr(db_module, "_register_vector_safe", lambda conn: None)
+    monkeypatch.setattr(db_module.sql, "SQL", lambda text: type("S", (), {"format": lambda self, **kw: text})())
+    conn = _RecordingConn()
+    db_module.init_db_v2(conn, 4, 1)
+
+    assert not any("italian" in statement for statement in conn.statements)
+    assert not any("unaccent" in statement for statement in conn.statements)
+
+
+def test_init_db_v2_creates_italian_unaccent_on_request(monkeypatch):
+    from rag_indexer import db as db_module
+
+    monkeypatch.setattr(db_module, "_register_vector_safe", lambda conn: None)
+    monkeypatch.setattr(db_module.sql, "SQL", lambda text: type("S", (), {"format": lambda self, **kw: text})())
+    conn = _RecordingConn()
+    db_module.init_db_v2(conn, 4, 1, fts_config="italian_unaccent")
+
+    assert any("CREATE TEXT SEARCH CONFIGURATION italian_unaccent" in statement for statement in conn.statements)

@@ -1,11 +1,10 @@
 @echo off
-REM Inizializza lo schema v2 sul target DSN canonico di llm-context.
+REM Create the v2 schema on the database referenced by LLM_CONTEXT_DSN.
 
 cd /d "%~dp0\.."
 
 if "%LLM_CONTEXT_DSN%"=="" (
-  echo [ERRORE] LLM_CONTEXT_DSN non impostato.
-  echo [INFO] Passa il DSN al processo dal PowerShell di lancio oppure dalla dashboard MCP.
+  echo [ERROR] LLM_CONTEXT_DSN is not set.
   exit /b 1
 )
 

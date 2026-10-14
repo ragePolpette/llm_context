@@ -56,11 +56,11 @@ def ingest_project_v2(
 ) -> IngestStats:
     stats = IngestStats()
     start_time = time.monotonic()
-    if not incremental:
-        stats.deleted_rows = store.delete_repo(repo_id)
     batch_size = _get_env_int("EMBED_BATCH_SIZE", 16)
     seen_paths: set[str] = set()
+    indexed_paths: set[str] = set()
     model_id = _embedder_id(embedder)
+    track_symbol_refs = symbol_search_enabled and store.has_symbol_refs_table()
 
     for path in scan_files(
         root,
@@ -92,6 +92,7 @@ def ingest_project_v2(
             and existing.get("deleted_at") is None
         ):
             stats.files_skipped += 1
+            indexed_paths.add(path_norm)
             continue
 
         source_type = get_source_type(path)
@@ -120,14 +121,40 @@ def ingest_project_v2(
             doc_id=doc_id,
         )
 
-        doc_id = store.upsert_document(doc_record)
-        store.delete_chunks(doc_id)
-        symbol_count = 0
-
+        symbol_infos: Optional[list[Any]] = None
+        call_sites: list[Any] = []
         if symbol_search_enabled and source_type == "code":
             try:
-                from .symbol_extractor import extract_symbols, extract_call_sites
+                from .symbol_extractor import extract_call_sites, extract_symbols
+
                 symbol_infos = extract_symbols(text, language or "")
+                if track_symbol_refs:
+                    call_sites = extract_call_sites(text, language or "")
+            except Exception as _sym_exc:
+                symbol_infos = None
+                call_sites = []
+                logger.warning("Symbol extraction failed for %s: %s", path, _sym_exc)
+
+        chunks = _chunk_document(
+            text,
+            source_type=source_type,
+            relative_path=relative_path,
+            language=language,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            md_chunk_size=md_chunk_size,
+            code_chunk_size=code_chunk_size,
+            min_chunk_chars=min_chunk_chars,
+        )
+        embeddings = _embed_chunks(embedder, [chunk.text for chunk in chunks], batch_size) if chunks else []
+
+        # All writes for one document share a transaction so readers never observe
+        # a document whose old chunks are gone but new chunks are not yet visible.
+        with store.atomic():
+            doc_id = store.upsert_document(doc_record)
+            store.delete_chunks(doc_id)
+            symbol_count = 0
+            if symbol_infos is not None:
                 store.delete_symbols(doc_id)
                 symbol_records = [
                     SymbolRecord(
@@ -146,9 +173,7 @@ def ingest_project_v2(
                 if symbol_records:
                     store.insert_symbols(symbol_records)
                 symbol_count = len(symbol_records)
-
-                if store.has_symbol_refs_table():
-                    call_sites = extract_call_sites(text, language or "")
+                if track_symbol_refs:
                     store.delete_symbol_refs(doc_id)
                     ref_records = [
                         SymbolRefRecord(
@@ -162,67 +187,23 @@ def ingest_project_v2(
                     ]
                     if ref_records:
                         store.insert_symbol_refs(ref_records)
-            except Exception as _sym_exc:
-                logger.warning("Symbol extraction failed for %s: %s", path, _sym_exc)
 
-        if source_type == "md":
-            chunks = chunk_markdown(text, md_chunk_size, chunk_overlap, min_chunk_chars)
-        elif source_type == "code":
-            chunks = chunk_code(text, code_chunk_size, min_chunk_chars)
-            header_text = _build_code_header(text, relative_path, language=language)
-            if header_text:
-                header_chunk = Chunk(
-                    text=header_text,
-                    char_start=0,
-                    char_end=0,
-                    line_start=1,
-                    line_end=1,
-                    section_path="",
-                    is_header=True,
-                )
-                chunks = [header_chunk] + chunks
-        else:
-            chunks = chunk_text(text, chunk_size, chunk_overlap, min_chunk_chars)
+            chunk_records, embedding_records = _build_chunk_records(
+                chunks,
+                embeddings,
+                doc_id=doc_id,
+                model_id=model_id,
+                embedding_dim=store.embedding_dim,
+            )
+            inserted = store.insert_chunks_and_embeddings(chunk_records, embedding_records)
 
         if not chunks:
             stats.files_skipped += 1
             logger.info("Skip file %s: no chunks", path)
             continue
 
-        chunk_texts = [chunk.text for chunk in chunks]
-        embeddings = _embed_chunks(embedder, chunk_texts, batch_size)
-        chunk_records: list[ChunkRecord] = []
-        embedding_records: list[EmbeddingRecord] = []
-
-        for index, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-            text_hash = _hash_text(_normalize_text(chunk.text))
-            token_count = _token_count(chunk.text)
-            chunk_record = ChunkRecord(
-                doc_id=doc_id,
-                chunk_index=index,
-                char_start=chunk.char_start,
-                char_end=chunk.char_end,
-                line_start=chunk.line_start,
-                line_end=chunk.line_end,
-                text=chunk.text,
-                text_hash=text_hash,
-                section_path=chunk.section_path,
-                token_count=token_count,
-                quality_flags={"header": chunk.is_header},
-                is_header=chunk.is_header,
-            )
-            chunk_records.append(chunk_record)
-            embedding_records.append(
-                EmbeddingRecord(
-                    chunk_id=chunk_record.chunk_id,
-                    model_id=model_id,
-                    dim=store.embedding_dim,
-                    embedding=embedding,
-                )
-            )
-
+        indexed_paths.add(path_norm)
         stats.chunks_created += len(chunk_records)
-        inserted = store.insert_chunks_and_embeddings(chunk_records, embedding_records)
         stats.chunks_inserted += inserted
         stats.files_indexed += 1
         logger.info(
@@ -236,28 +217,100 @@ def ingest_project_v2(
         )
         logger.debug("Indexed file %s: %s chunks", path, len(chunk_records))
 
+    existing_docs = store.list_documents(repo_id)
     if incremental:
-        existing_docs = store.list_documents(repo_id)
         to_delete = [
             doc["doc_id"]
             for doc in existing_docs
             if doc["path_norm"] not in seen_paths and doc.get("deleted_at") is None
         ]
         store.mark_documents_deleted(repo_id, to_delete)
+    else:
+        stale = [doc["doc_id"] for doc in existing_docs if doc["path_norm"] not in indexed_paths]
+        stats.deleted_rows = store.delete_documents(repo_id, stale)
 
     stats.duration_sec = time.monotonic() - start_time
     return stats
 
 
+def _chunk_document(
+    text: str,
+    *,
+    source_type: str,
+    relative_path: str,
+    language: Optional[str],
+    chunk_size: int,
+    chunk_overlap: int,
+    md_chunk_size: int,
+    code_chunk_size: int,
+    min_chunk_chars: int,
+) -> list[Chunk]:
+    if source_type == "md":
+        return chunk_markdown(text, md_chunk_size, chunk_overlap, min_chunk_chars)
+    if source_type == "code":
+        chunks = chunk_code(text, code_chunk_size, min_chunk_chars)
+        header_text = _build_code_header(text, relative_path, language=language)
+        if header_text:
+            header_chunk = Chunk(
+                text=header_text,
+                char_start=0,
+                char_end=0,
+                line_start=1,
+                line_end=1,
+                section_path="",
+                is_header=True,
+            )
+            chunks = [header_chunk] + chunks
+        return chunks
+    return chunk_text(text, chunk_size, chunk_overlap, min_chunk_chars)
+
+
+def _build_chunk_records(
+    chunks: list[Chunk],
+    embeddings: list[list[float]],
+    *,
+    doc_id: uuid.UUID,
+    model_id: str,
+    embedding_dim: int,
+) -> tuple[list[ChunkRecord], list[EmbeddingRecord]]:
+    chunk_records: list[ChunkRecord] = []
+    embedding_records: list[EmbeddingRecord] = []
+    for index, (chunk, embedding) in enumerate(zip(chunks, embeddings, strict=True)):
+        chunk_record = ChunkRecord(
+            doc_id=doc_id,
+            chunk_index=index,
+            char_start=chunk.char_start,
+            char_end=chunk.char_end,
+            line_start=chunk.line_start,
+            line_end=chunk.line_end,
+            text=chunk.text,
+            text_hash=_hash_text(_normalize_text(chunk.text)),
+            section_path=chunk.section_path,
+            token_count=_token_count(chunk.text),
+            quality_flags={"header": chunk.is_header},
+            is_header=chunk.is_header,
+        )
+        chunk_records.append(chunk_record)
+        embedding_records.append(
+            EmbeddingRecord(
+                chunk_id=chunk_record.chunk_id,
+                model_id=model_id,
+                dim=embedding_dim,
+                embedding=embedding,
+            )
+        )
+    return chunk_records, embedding_records
+
+
 def _relative_path(path: Path, root: Path) -> str:
     try:
-        return str(path.resolve().relative_to(root.resolve()))
+        return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
-        return str(path)
+        return path.as_posix()
 
 
 def _normalize_path(path: str) -> str:
-    return path.replace("/", "\\").lower()
+    return path.replace("\\", "/").lower()
 
 
 def _normalize_text(text: str) -> str:

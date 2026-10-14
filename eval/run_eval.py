@@ -34,7 +34,7 @@ def main() -> None:
         embedder = LocalSentenceTransformerEmbedder(model_name=local_model)
 
     conn = get_connection(dsn)
-    store = RagStore(conn, config.embedding_dim)
+    store = RagStore(conn, config.embedding_dim, config.fts_config)
 
     queries_path = Path(__file__).resolve().parent / "queries.json"
     queries = json.loads(queries_path.read_text(encoding="utf-8"))
@@ -45,7 +45,7 @@ def main() -> None:
 
     for item in queries:
         query = item["query"]
-        expected = [path.lower() for path in item.get("expected_paths", [])]
+        expected = [path.replace("\\", "/").lower() for path in item.get("expected_paths", [])]
         top_k = int(item.get("top_k", 8))
         results, _ = retrieve_v2(
             store=store,
@@ -75,7 +75,7 @@ def _first_hit_rank(results, expected_paths):
     if not expected_paths:
         return None
     for index, item in enumerate(results, start=1):
-        path = str(item.get("source_path", "")).lower()
+        path = str(item.get("source_path", "")).replace("\\", "/").lower()
         if any(expected in path for expected in expected_paths):
             return index
     return None

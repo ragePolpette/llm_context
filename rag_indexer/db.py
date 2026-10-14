@@ -128,24 +128,33 @@ def inspect_database_runtime(
             conn.close()
 
 
-def init_db_v2(conn: Any, embedding_dim: int, ivfflat_lists: int) -> None:
+ITALIAN_UNACCENT_FTS_SQL = """
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_ts_config WHERE cfgname = 'italian_unaccent') THEN
+        CREATE TEXT SEARCH CONFIGURATION italian_unaccent (COPY = italian);
+        ALTER TEXT SEARCH CONFIGURATION italian_unaccent
+          ALTER MAPPING FOR hword, hword_part, word
+          WITH unaccent, italian_stem;
+      END IF;
+    END
+    $$;
+"""
+
+
+def init_db_v2(
+    conn: Any,
+    embedding_dim: int,
+    ivfflat_lists: int,
+    fts_config: str = "simple",
+) -> None:
     dim = _validate_positive_int(embedding_dim, "embedding_dim")
     lists = _validate_positive_int(ivfflat_lists, "ivfflat_lists")
     with conn.cursor() as cur:
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-        cur.execute("CREATE EXTENSION IF NOT EXISTS unaccent;")
-        cur.execute("""
-            DO $$
-            BEGIN
-              IF NOT EXISTS (SELECT 1 FROM pg_ts_config WHERE cfgname = 'italian_unaccent') THEN
-                CREATE TEXT SEARCH CONFIGURATION italian_unaccent (COPY = italian);
-                ALTER TEXT SEARCH CONFIGURATION italian_unaccent
-                  ALTER MAPPING FOR hword, hword_part, word
-                  WITH unaccent, italian_stem;
-              END IF;
-            END
-            $$;
-        """)
+        if fts_config == "italian_unaccent":
+            cur.execute("CREATE EXTENSION IF NOT EXISTS unaccent;")
+            cur.execute(ITALIAN_UNACCENT_FTS_SQL)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS documents (

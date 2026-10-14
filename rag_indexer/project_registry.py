@@ -76,6 +76,10 @@ class ProjectRecord:
     exclude_globs: list[str] = field(default_factory=list)
     ingest_enabled: bool = False
     write_enabled: bool = False
+    scope_map: dict[str, list[str]] = field(default_factory=dict)
+    path_aliases: dict[str, str] = field(default_factory=dict)
+    product_targets: dict[str, list[str]] = field(default_factory=dict)
+    product_aliases: dict[str, str] = field(default_factory=dict)
     runtime_state: ProjectRuntimeState = field(default_factory=ProjectRuntimeState)
     index_manifest: Optional[ProjectIndexManifest] = None
 
@@ -153,7 +157,7 @@ class ProjectRegistry:
         return [project for project in self.list_projects() if project.ingest_enabled]
 
     def save_runtime_state(self, project_id: str, **updates: Any) -> ProjectRecord:
-        project = self.require_project(project_id)
+        self.require_project(project_id)
         current_state = _load_state_map(self.state_path).get(project_id, {})
         current_state.update({key: value for key, value in updates.items() if value is not None})
         state_map = _load_state_map(self.state_path)
@@ -259,6 +263,10 @@ def _load_project_record(
         exclude_globs=_coerce_str_list(item.get("exclude_globs")),
         ingest_enabled=bool(item.get("ingest_enabled", False)),
         write_enabled=bool(item.get("write_enabled", False)),
+        scope_map=_coerce_list_map(item.get("scope_map"), project_id, "scope_map"),
+        path_aliases=_coerce_str_map(item.get("path_aliases"), project_id, "path_aliases"),
+        product_targets=_coerce_list_map(item.get("product_targets"), project_id, "product_targets"),
+        product_aliases=_coerce_str_map(item.get("product_aliases"), project_id, "product_aliases"),
         runtime_state=runtime_state,
         index_manifest=index_manifest,
     )
@@ -324,6 +332,22 @@ def _load_state_map(state_path: Path) -> dict[str, dict[str, Any]]:
         for project_id, value in projects_payload.items()
         if isinstance(value, dict)
     }
+
+
+def _coerce_list_map(value: Any, project_id: str, field_name: str) -> dict[str, list[str]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Project '{project_id}' field '{field_name}' must be a mapping")
+    return {str(key): _coerce_str_list(items) for key, items in value.items()}
+
+
+def _coerce_str_map(value: Any, project_id: str, field_name: str) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Project '{project_id}' field '{field_name}' must be a mapping")
+    return {str(key): str(item) for key, item in value.items() if item is not None}
 
 
 def _coerce_str_list(value: Any) -> list[str]:

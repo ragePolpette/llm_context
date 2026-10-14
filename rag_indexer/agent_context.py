@@ -5,7 +5,7 @@ from typing import Any, Optional
 from .db import get_connection, get_pool
 from .embedder import Embedder
 from .retrieval import retrieve_v2
-from .store import RagStore
+from .store import DEFAULT_FTS_CONFIG, RagStore
 
 
 def build_context(
@@ -25,12 +25,13 @@ def build_context(
     max_chunks_per_doc: int = 2,
     min_score: float = 0.15,
     header_penalty: float = 0.15,
+    fts_config: str = DEFAULT_FTS_CONFIG,
 ) -> tuple[str, list[dict[str, Any]]]:
     # Try to use pool first, fallback to single connection
     pool = get_pool(dsn)
     if pool is not None:
         with pool.connection() as conn:
-            store = RagStore(conn, embedding_dim)
+            store = RagStore(conn, embedding_dim, fts_config)
             results, _ = retrieve_v2(
                 store=store,
                 embedder=embedder,
@@ -51,7 +52,7 @@ def build_context(
         # Fallback if psycopg_pool not available
         conn = get_connection(dsn)
         try:
-            store = RagStore(conn, embedding_dim)
+            store = RagStore(conn, embedding_dim, fts_config)
             results, _ = retrieve_v2(
                 store=store,
                 embedder=embedder,

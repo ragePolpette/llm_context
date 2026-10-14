@@ -4,14 +4,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 
-KNOWN_PRODUCT_ALIASES = {
-    "legacy": "legacy",
-    "legacyapp": "legacy",
-    "fatturhello": "fatturhello",
-    "fiscobot": "fiscobot",
-}
-
-
 def map_work_item_to_codebase(
     *,
     summary: str,
@@ -20,14 +12,22 @@ def map_work_item_to_codebase(
     project_record: Any,
     functional_context: dict[str, Any],
     max_paths: int = 6,
+    product_targets: Optional[dict[str, list[str]]] = None,
+    product_aliases: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
-    normalized_hint = _normalize_product_target(product_target_hint)
+    targets = {
+        str(name).strip().lower(): [str(token).strip().lower() for token in tokens if str(token).strip()]
+        for name, tokens in (product_targets or {}).items()
+        if str(name).strip()
+    }
+    normalized_hint = _normalize_product_target(product_target_hint, product_aliases)
     repo_target = _infer_repo_target(project_record)
     paths = _extract_paths(functional_context, max_paths=max_paths)
     product_target = _infer_product_target(
         product_target_hint=normalized_hint,
         repo_target=repo_target,
         paths=paths,
+        product_targets=targets,
     )
     area = _infer_area(paths)
     confidence = _compute_confidence(
@@ -69,11 +69,18 @@ def map_work_item_to_codebase(
     }
 
 
-def _normalize_product_target(value: Optional[str]) -> Optional[str]:
+def _normalize_product_target(
+    value: Optional[str],
+    product_aliases: Optional[dict[str, str]] = None,
+) -> Optional[str]:
     if not value:
         return None
     normalized = str(value).strip().lower()
-    return KNOWN_PRODUCT_ALIASES.get(normalized, normalized or None)
+    aliases = {
+        str(key).strip().lower(): str(target).strip().lower()
+        for key, target in (product_aliases or {}).items()
+    }
+    return aliases.get(normalized, normalized) or None
 
 
 def _infer_repo_target(project_record: Any) -> str:
@@ -107,19 +114,16 @@ def _infer_product_target(
     product_target_hint: Optional[str],
     repo_target: str,
     paths: list[str],
+    product_targets: dict[str, list[str]],
 ) -> str:
-    if product_target_hint in {"legacy", "fatturhello", "fiscobot"}:
+    if product_target_hint and product_target_hint in product_targets:
         return product_target_hint
 
-    haystacks = [repo_target, *paths]
-    for value in haystacks:
+    for value in [repo_target, *paths]:
         text = value.lower()
-        if "fatturhello" in text:
-            return "fatturhello"
-        if "fiscobot" in text:
-            return "fiscobot"
-        if any(token in text for token in ("legacyapp", "legacy", "pubblico", "librerie", "controllers")):
-            return "legacy"
+        for name, tokens in product_targets.items():
+            if any(token in text for token in tokens):
+                return name
     return "unknown"
 
 
@@ -189,11 +193,11 @@ def _collect_blockers(
 ) -> list[str]:
     blockers: list[str] = []
     if not summary.strip() and not description.strip():
-        blockers.append("Work item privo di summary e description utili.")
+        blockers.append("Work item has no usable summary or description.")
     if not paths:
-        blockers.append("Nessun path rilevante trovato nella codebase.")
+        blockers.append("No relevant path found in the codebase.")
     if product_target_hint and product_target == "unknown":
-        blockers.append("Il product_target_hint non ha trovato riscontro nella codebase.")
+        blockers.append("product_target_hint did not match any configured product target.")
     return blockers
 
 
@@ -223,20 +227,20 @@ def _build_implementation_hint(
 ) -> str:
     entry_points = functional_context.get("entry_points") or []
     if feasibility == "blocked":
-        return "Prima chiarire il perimetro del work item o migliorare il mapping verso la codebase."
+        return "Clarify the work item scope or improve the mapping to the codebase first."
     if entry_points:
         primary = entry_points[0]
         hint = (
-            f"Parti da {primary.get('name') or 'symbol'} in "
-            f"{primary.get('source_path') or '(path sconosciuto)'}"
+            f"Start from {primary.get('name') or 'symbol'} in "
+            f"{primary.get('source_path') or '(unknown path)'}"
         )
         if len(paths) > 1:
-            hint += f"; poi verifica anche {paths[1]}"
+            hint += f"; then also check {paths[1]}"
         return hint
     if paths:
-        hint = f"Parti dal file {paths[0]}"
+        hint = f"Start from file {paths[0]}"
         if len(paths) > 1:
-            hint += f" e segui il flusso verso {paths[1]}"
+            hint += f" and follow the flow to {paths[1]}"
         return hint
-    return "Mapping ancora troppo debole per proporre un hint implementativo affidabile."
+    return "Mapping is still too weak to suggest a reliable implementation hint."
 

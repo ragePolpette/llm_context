@@ -79,9 +79,9 @@ The ingest path is intentionally not exposed as a standard always-on MCP tool su
 Main runtime areas:
 
 - `rag_indexer/`: scanning, chunking, embedding, storage, and retrieval logic
-- `mcp_server.py`: MCP transport entrypoint
+- `mcp_server.py`: MCP stdio transport
 - `mcp_server_http.py`: local HTTP transport
-- `cli.py`: operational ingest and maintenance CLI
+- `rag_indexer/cli.py` (`llm-context`, also `cli.py`): server launcher and operational ingest and maintenance CLI
 - `config.example.yaml`: example configuration for local setup
 - `projects.example.yaml`: project registry example for multi-project mode
 
@@ -120,37 +120,48 @@ Optional symbol extraction (tree-sitter):
 pip install -e ".[symbols]"
 ```
 
+The package installs an `llm-context` command; `python cli.py ...` is equivalent.
+
 Create the schema, then ingest a project:
 
 ```bash
 cp projects.example.yaml projects.yaml
-python cli.py --config config.yaml init-db-v2 --dsn <dsn>
-python cli.py --config config.yaml ingest --dsn <dsn> --project-id <project_id> --embedder local-st
+llm-context --config config.yaml init-db-v2 --dsn <dsn>
+LLM_CONTEXT_INGEST_ENABLED=true llm-context --config config.yaml ingest --dsn <dsn> --project-id <project_id>
 ```
+
+`ingest` and `query` default to the `local-st` embedder.
 
 Run the MCP server (stdio):
 
 ```bash
-python mcp_server.py
+llm-context serve            # or: python mcp_server.py
 ```
 
-Run the local HTTP server (binds to `127.0.0.1:8765` by default; `/health` and `/rpc`):
+The stdio transport follows the MCP specification: one JSON-RPC message per line (newline-delimited JSON). Clients that still use LSP-style `Content-Length` framing can opt in with `llm-context serve --legacy-content-length` (or `python mcp_server.py --legacy-content-length`, or `MCP_STDIO_FRAMING=content-length`).
+
+Run the local HTTP server (binds to `127.0.0.1:8765` by default; `/mcp`, `/rpc` and `/health`):
 
 ```bash
-python mcp_server_http.py
+llm-context serve --transport http   # or: python mcp_server_http.py
 ```
 
-Other CLI commands: `list-projects`, `query`, `export-snapshot`. Use `python cli.py <command> --help` for options.
+Tool calls run in a worker thread, so a slow query does not block other requests. Only one instance per checkout can run (file lock); a running instance is never killed automatically.
 
-The `scripts/` directory contains Windows `.bat` wrappers for the same operations, and `reingest_completo.bat` runs a full re-ingest.
+Other CLI commands: `list-projects`, `query`, `context`, `export-snapshot`. Use `llm-context <command> --help` for options.
+
+The `scripts/` directory contains a few Windows `.bat` wrappers (`init_db`, `ingest`, `start_http_server`, `start_stdio_server`, `status`, `stop_http_server`) and `smoke_test_http.py`. `reingest_full.bat` runs a full re-ingest of this repository with `config.ingest.yaml`.
 
 ## Configuration
 
 Key files:
 
-- `config.example.yaml`: runtime configuration template (the repository also tracks a `config.yaml` with the same defaults)
-- `projects.example.yaml`: project registry for multi-project mode
-- `.env.example`: environment variables (DSN, embedder, transport security, model cache)
+- `config.yaml`: tracked, neutral runtime defaults. Do not put machine-specific values here.
+- `config.example.yaml`: a commented example for a fictional repository. Copy it to `config.local.yaml` (untracked, starts with `extends: config.yaml`) and point `LLM_CONTEXT_CONFIG_PATH` or `--config` at it.
+- `projects.example.yaml`: project registry template. Copy it to `projects.yaml`, which is git-ignored because it describes local paths.
+- `.env.example`: environment variables (DSN, embedder, limits, transport security, model cache)
+
+Runtime state (`projects.state.json` and `project_manifests/`) is written under `.local/runtime/` by default and is git-ignored. `config.rework.yaml` and `config.ingest.yaml` describe the self-indexing setup of this repository (`projects.rework.yaml`).
 
 Important settings:
 
@@ -158,22 +169,71 @@ Important settings:
 - `projects_state_path`
 - `ingest_enabled` (default `false`)
 - `write_enabled` (default `false`)
+- `fts_config` (default `simple`)
 - explicit `project_id` on every ingest and MCP retrieval call
 
-Configuration files can extend one another with `extends:`, as in `config.rework.yaml` and `config.ingest.yaml`. Environment variables such as `LLM_CONTEXT_CONFIG_PATH`, `LLM_CONTEXT_INGEST_ENABLED` and `LLM_CONTEXT_WRITE_ENABLED` override file values.
+Configuration files can extend one another with `extends:`. Values are coerced to the declared types, so `ingest_enabled: "false"` is a boolean `false`. Environment variables such as `LLM_CONTEXT_CONFIG_PATH`, `LLM_CONTEXT_INGEST_ENABLED` and `LLM_CONTEXT_WRITE_ENABLED` override file values.
+
+### Embedder
+
+The embedder (`LLM_CONTEXT_EMBEDDER`), model (`LLM_CONTEXT_LOCAL_MODEL`) and dimension (`LLM_CONTEXT_EMBEDDING_DIM`, default `embedding_dim`) are server-side settings. MCP tools no longer accept `embedder`, `local_model` or `embedding_dim` from clients: a value equal to the server setting is ignored, any other value is rejected.
+
+Client-controlled sizes are capped: `top_k` (`LLM_CONTEXT_MAX_TOP_K`, default 50), symbol `limit` (`LLM_CONTEXT_MAX_SYMBOL_LIMIT`, default 200), `max_chars` (`LLM_CONTEXT_MAX_CHARS_LIMIT`, default 100000) and `query_text` length (`LLM_CONTEXT_MAX_QUERY_CHARS`, default 8000).
+
+### Project-specific mappings
+
+Domain-specific behavior lives in configuration, with empty defaults. Each mapping can be set globally in the config file or per project in the registry; a non-empty project value wins.
+
+- `scope_map`: query keywords that narrow retrieval to a path prefix
+- `path_aliases`: path fragments rewritten in queries (`{from: to}`)
+- `product_targets` and `product_aliases`: used by `map_work_item_to_codebase` to infer the product touched by a work item. Without them `product_target` is `unknown`.
+
+```yaml
+projects:
+  - project_id: shop
+    root_path: ../acme-shop
+    scope_map:
+      src/billing/: [billing, invoice]
+    product_targets:
+      storefront: [storefront, web]
+```
+
+The project registry is reloaded automatically when `projects.yaml`, the state file or a manifest changes on disk (checked on `/health`, `list_projects`, `get_project_info`, `context_info` and on every project-scoped tool call).
+
+### Paths
+
+Indexed paths and path prefixes use forward slashes (`src/api/Controller.cs`) on every platform. Existing indexes with backslash paths keep working for path-prefix filters; a full re-ingest rewrites them in posix form.
+
+### Keyword search language
+
+Keyword search uses the PostgreSQL text search configuration named by `fts_config` (default `simple`, which works for any language; `english` and the other built-in configurations are also valid). The value is used both when chunks are written and when they are queried, so re-ingest after changing it.
+
+For Italian with accent folding, set `fts_config: italian_unaccent`. `init-db-v2` creates it when that value is configured; to create it manually:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS unaccent;
+CREATE TEXT SEARCH CONFIGURATION italian_unaccent (COPY = italian);
+ALTER TEXT SEARCH CONFIGURATION italian_unaccent
+  ALTER MAPPING FOR hword, hword_part, word WITH unaccent, italian_stem;
+```
+
+### Ingest
+
+A full ingest (without `--incremental`) no longer deletes the project index up front. Every file is re-indexed and each document is replaced in a single transaction, so queries keep seeing the previous version until the new one is committed. Documents that disappeared from the source tree are removed at the end of the run.
 
 ## Security
 
-The HTTP server binds to localhost by default, checks `Host` and `Origin` headers against allowlists, and has no authentication of its own. See [SECURITY.md](SECURITY.md) for the threat model and reporting instructions.
+The HTTP server binds to localhost by default and checks `Host` and `Origin` headers against allowlists. Set `MCP_AUTH_TOKEN` to require `Authorization: Bearer <token>` on every HTTP endpoint; the server refuses to bind to a non-loopback `MCP_HOST` without it. `mcp_proxy.py` and `scripts/smoke_test_http.py` send the token when `MCP_AUTH_TOKEN` is set. See [SECURITY.md](SECURITY.md) for the threat model and reporting instructions.
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"
+ruff check .
 python -m pytest -q
 ```
 
-Tests do not require a running database; tests that need one are skipped. No linter is configured. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Tests do not require a running database; tests that need one are skipped. See [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## Project Status
 

@@ -20,7 +20,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .config import AppConfig
 from .context_assembler import assemble_functional_context
@@ -70,7 +70,7 @@ def export_snapshot(
 
     conn = get_connection(dsn)
     try:
-        store = RagStore(conn, embedding_dim)
+        store = RagStore(conn, embedding_dim, config.fts_config)
         has_refs = store.has_symbol_refs_table()
 
         repo_stats = store.get_repo_stats(project_id)

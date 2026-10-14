@@ -29,7 +29,15 @@ pip install -e ".[symbols]"
 python -m pytest -q
 ```
 
-The test suite does not require a running database; tests that need one are skipped. There is no linter configured in this repository.
+The test suite does not require a running database; tests that need one are skipped.
+
+## Lint
+
+```bash
+ruff check .
+```
+
+Ruff is configured in `pyproject.toml` and runs in CI.
 
 ## Security rules
 
