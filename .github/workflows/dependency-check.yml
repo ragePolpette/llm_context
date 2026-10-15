@@ -1,0 +1,13 @@
+name: Dependency check
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 7 1 * *"
+
+jobs:
+  report:
+    uses: ragePolpette/.github/.github/workflows/dependency-check.yml@main
+    permissions:
+      contents: read
+      security-events: read

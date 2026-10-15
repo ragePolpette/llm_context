@@ -1,17 +1,15 @@
+# Version updates are disabled (open-pull-requests-limit: 0): Dependabot only keeps
+# security alerts and security update PRs. Outdated packages are reported by the
+# monthly "Dependency check" workflow, which flags a release only after it is 30 days old.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
-    groups:
-      actions:
-        patterns: ["*"]
+    open-pull-requests-limit: 0
   - package-ecosystem: pip
     directory: /
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      minor-and-patch:
-        update-types: ["minor", "patch"]
+      interval: monthly
+    open-pull-requests-limit: 0
